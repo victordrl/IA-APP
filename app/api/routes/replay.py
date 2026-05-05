@@ -33,7 +33,7 @@ _builder = TensorBuilder()
 
 _current_replay: BacktraderReplay | None = None
 _current_step: int = 0
-_tensors: list[torch.Tensor] = []
+_tensors_grouped: list[dict[str, torch.Tensor]] = []
 _replay_active: bool = False
 
 
@@ -76,7 +76,7 @@ async def start_replay(req: ReplayRequest):
             refresh_seconds=settings.replay_refresh_seconds,
         )
         _current_step = 0
-        _tensors = []
+        _tensors_grouped = []
         _replay_active = True
 
         asyncio.create_task(_run_replay())
@@ -101,7 +101,7 @@ def stop_replay():
         return {
             "status": "stopped",
             "step": _current_step,
-            "tensors_built": len(_tensors),
+            "tensors_built": len(_tensors_grouped),
         }
     return {"status": "no_replay_running"}
 
@@ -119,21 +119,38 @@ def replay_status():
 
 @router.get("/tensors")
 def get_tensors():
-    """Return the tensors built during replay."""
+    """Return the tensors built during replay (grouped by indicator category)."""
+    if not _tensors_grouped:
+        return {"count": 0, "shapes": {}}
+
+    shapes = []
+    for tg in _tensors_grouped:
+        step_shapes = {k: list(v.shape) if v is not None else None for k, v in tg.items()}
+        shapes.append(step_shapes)
+
     return {
-        "count": len(_tensors),
-        "shapes": [t.shape for t in _tensors] if _tensors else [],
+        "count": len(_tensors_grouped),
+        "shapes": shapes,
     }
 
 
-@router.get("/tensor/{index}")
-def get_tensor(index: int):
-    """Get a specific tensor by index."""
-    if index < 0 or index >= len(_tensors):
-        raise HTTPException(status_code=404, detail=f"Tensor index {index} not found")
-    tensor = _tensors[index]
+@router.get("/tensor/{step}/{grupo}")
+def get_tensor_by_group(step: int, grupo: str):
+    """Get tensor for a specific step and group (velocidad/tendencia/amplitud/liquidez)."""
+    valid_groups = ["velocidad", "tendencia", "amplitud", "liquidez"]
+    if grupo not in valid_groups:
+        raise HTTPException(status_code=400, detail=f"Grupo inválido. Available: {valid_groups}")
+
+    if step < 0 or step >= len(_tensors_grouped):
+        raise HTTPException(status_code=404, detail=f"Step {step} not found")
+
+    tensor = _tensors_grouped[step].get(grupo)
+    if tensor is None:
+        raise HTTPException(status_code=404, detail=f"Tensor for grupo '{grupo}' at step {step} is None")
+
     return {
-        "index": index,
+        "step": step,
+        "grupo": grupo,
         "shape": list(tensor.shape),
         "data": tensor.numpy().tolist(),
     }
@@ -167,20 +184,23 @@ async def _run_replay():
 
                 normalized = _normalizer.fit_transform(synced)
 
-                tensor = _builder.build(normalized)
-                _tensors.append(tensor)
+                tensors_grouped = _builder.build_grouped(normalized)
+                _tensors_grouped.append(tensors_grouped)
 
+                # Debug output con shapes por grupo
+                shapes_str = ", ".join([f"{k}:{v.shape[1:] if v is not None else 'None'}" for k, v in tensors_grouped.items()])
                 logger.info(
-                    "Tensor built for step {}/{} — shape {}",
+                    "[Step {}/{}] Tensores: {}",
                     _current_step,
                     _current_replay.total_steps,
-                    list(tensor.shape),
+                    shapes_str,
                 )
+
             except Exception as e:
                 logger.error("Error building tensor at step {}: {}", _current_step, e)
 
         _replay_active = False
-        logger.success("Replay finished — {} tensors built", len(_tensors))
+        logger.success("Replay finished — {} steps completed", len(_tensors_grouped))
 
     except Exception as e:
         logger.error("Replay error: {}", e)

@@ -12,6 +12,7 @@ import torch
 from loguru import logger
 
 from app.config import settings
+from app.core.processing.indicators import IndicatorEngine
 
 
 class TensorBuilder:
@@ -73,6 +74,77 @@ class TensorBuilder:
         values = tail.select_dtypes(include=[np.number]).values
         tensor = torch.tensor(values, dtype=torch.float32).unsqueeze(0)
         return tensor
+
+    def build_grouped(self, df: pd.DataFrame) -> dict[str, torch.Tensor]:
+        """Build separate tensors for each indicator group.
+
+        Each tensor contains:
+        - Indicator columns for that group (from all timeframes)
+        - progress_vela columns (1h, 4h, 1d) - shared across all groups
+
+        Args:
+            df: Fully synchronized, normalized DataFrame.
+
+        Returns:
+            Dict with keys: "velocidad", "tendencia", "amplitud", "liquidez"
+            Each value is a torch.Tensor of shape (1, window_size, num_features).
+        """
+        self._validate(df)
+
+        # Columns de progreso de vela (comunes a todos los grupos)
+        progress_cols = [
+            "progress_vela_1h_1h",
+            "progress_vela_4h",
+            "progress_vela_1d",
+        ]
+        available_progress = [c for c in progress_cols if c in df.columns]
+
+        # Obtener columnas de indicadores por grupo
+        groups_info = IndicatorEngine.get_all_groups_columns()
+
+        result = {}
+        for group_name, indicator_cols in groups_info.items():
+            # Filtrar solo las columnas que existen en el DataFrame
+            available_indicators = [c for c in indicator_cols if c in df.columns]
+
+            # Combinar indicadores + progress_vela
+            group_cols = available_indicators + available_progress
+
+            if not group_cols:
+                logger.warning(f"No columns found for group {group_name}")
+                result[group_name] = None
+                continue
+
+            # Extraer valores
+            group_df = df[group_cols].select_dtypes(include=[np.number])
+            values = group_df.values
+
+            # Validar y hacer sliding window
+            if len(values) < self._window_size:
+                logger.warning(f"Group {group_name}: not enough rows ({len(values)} < {self._window_size})")
+                result[group_name] = None
+                continue
+
+            num_rows = len(values)
+            num_windows = max(0, num_rows - self._window_size + 1)
+
+            # Sliding window view
+            windows = np.lib.stride_tricks.sliding_window_view(values, self._window_size, axis=0)
+            windows = windows.transpose(0, 2, 1)  # (num_windows, window_size, num_features)
+
+            tensor = torch.tensor(windows, dtype=torch.float32)
+
+            logger.info(
+                "Grupo {}: shape {} (indicators={}, progress={})",
+                group_name,
+                list(tensor.shape),
+                len(available_indicators),
+                len(available_progress),
+            )
+
+            result[group_name] = tensor
+
+        return result
 
     # ── Validation ──────────────────────────────────
 

@@ -182,6 +182,7 @@ class BacktraderReplay:
 
             window_1h = self._data_1h.iloc[step : step + self._window_size].copy()
             window_1h = window_1h.reset_index()
+            window_1h["progress_vela"] = 1.0
 
             logger.debug("Replay step {}/{}", step + 1, self._max_steps)
 
@@ -197,24 +198,30 @@ class BacktraderReplay:
 
             df_4h = self._reconstruct_timeframe(window_1h, "4h", 240)
             if not df_4h.empty:
-                logger.info("  4h_recon:  {} | O:{:.2f} H:{:.2f} L:{:.2f} C:{:.2f} V:{:.0f}".format(
+                progress_4h = ((step % 4) + 1) / 4.0
+                df_4h["progress_vela"] = progress_4h
+                logger.info("  4h_recon:  {} | O:{:.2f} H:{:.2f} L:{:.2f} C:{:.2f} V:{:.0f} | P:{:.2f}".format(
                     df_4h["timestamp"].iloc[0].strftime("%Y-%m-%d"),
                     df_4h["open"].iloc[0],
                     df_4h["high"].iloc[0],
                     df_4h["low"].iloc[0],
                     df_4h["close"].iloc[0],
                     df_4h["volume"].iloc[0],
+                    progress_4h,
                 ))
 
             df_1d = self._reconstruct_timeframe(window_1h, "1d", 24)
             if not df_1d.empty:
-                logger.info("  1d_recon:  {} | O:{:.2f} H:{:.2f} L:{:.2f} C:{:.2f} V:{:.0f}".format(
+                progress_1d = ((step % 24) + 1) / 24.0
+                df_1d["progress_vela"] = progress_1d
+                logger.info("  1d_recon:  {} | O:{:.2f} H:{:.2f} L:{:.2f} C:{:.2f} V:{:.0f} | P:{:.2f}".format(
                     df_1d["timestamp"].iloc[0].strftime("%Y-%m-%d"),
                     df_1d["open"].iloc[0],
                     df_1d["high"].iloc[0],
                     df_1d["low"].iloc[0],
                     df_1d["close"].iloc[0],
                     df_1d["volume"].iloc[0],
+                    progress_1d,
                 ))
 
             yield {
