@@ -4,6 +4,8 @@ Loads settings from .env file and environment variables.
 Covers RF-1 (environment isolation) requirements.
 """
 
+__version__ = "0.1.0"
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 

@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app import __version__
+from app.config import __version__
 from app.api.routes import data, replay, tensor
 from app.api.schemas import HealthResponse
 from app.utils.logger import setup_logging
