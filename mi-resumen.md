@@ -36,6 +36,2471 @@ The content is organized as follows:
 ```
 .env.example
 .gitignore
+app/api/routes/data.py
+app/api/routes/replay.py
+app/api/routes/tensor.py
+app/api/schemas.py
+app/config.py
+app/core/data_ingestion/historical.py
+app/core/data_ingestion/realtime.py
+app/core/data_ingestion/replay_backtrader.py
+app/core/data_ingestion/replay.py
+app/core/processing/indicators.py
+app/core/processing/normalizer.py
+app/core/sync/multi_timeframe.py
+app/core/tensor/builder.py
+app/main.py
+app/utils/logger.py
+README.md
+repomix-output.xml
+requirements.txt
+requisitos ia 1.docx
+run_visualizer.bat
+run.py
+tests/test_api_health.py
+tests/test_normalizer.py
+tests/test_replay_visualizer.py
+tests/test_tensor_builder.py
+```
+
+# Files
+
+## File: run_visualizer.bat
+`````batch
+@echo off
+cd /d C:\Users\PILON\Desktop\Proyectos\IA-APP
+python tests\test_replay_visualizer.py --mock
+pause
+`````
+
+## File: tests/test_replay_visualizer.py
+`````python
+"""
+Replay Visualizer - Muestra el replay en vivo con matplotlib.
+
+Usage:
+    python tests/test_replay_visualizer.py --mock    # Testing sin API
+    python tests/test_replay_visualizer.py       # Con API real
+
+Abre ventana con 3 subplots (1h, 4h, 1d) mostrando:
+- Velas OHLCV
+- Indicadores (RSI, MACD, EMA, Bollinger)  
+- Progress de la vela
+"""
+
+import time
+import threading
+import requests
+import pandas as pd
+import numpy as np
+import matplotlib
+matplotlib.use('TkAgg')
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+from datetime import datetime
+from typing import Dict, Any, Optional
+
+API_BASE = "http://localhost:8000"
+
+PAYLOAD = {
+    "symbol": "BTC/USDT",
+    "since": "2026-02-01T00:00:00",
+    "until": "2026-05-05T09:00:00",
+    "speed_multiplier": 10,
+}
+
+_api_data: Dict[str, Any] = {
+    "active": False,
+    "step": 0,
+    "total": 0,
+    "candles_1h": None,
+    "candles_4h": None,
+    "candles_1d": None,
+    "progress": {"1h": 1.0, "4h": 0.5, "1d": 0.25},
+}
+_stop_event = threading.Event()
+
+
+def start_replay() -> Dict:
+    """Inicia el replay."""
+    print(f"Iniciando replay: {PAYLOAD}")
+    resp = requests.post(f"{API_BASE}/replay/start", json=PAYLOAD, timeout=120)
+    resp.raise_for_status()
+    data = resp.json()
+    print(f"Replay iniciado: total_steps={data.get('total_steps')}, window={data.get('window_size')}")
+    _api_data["total"] = data.get("total_steps", 0)
+    _api_data["active"] = True
+    return data
+
+
+def stop_replay() -> None:
+    """Detiene el replay."""
+    try:
+        requests.post(f"{API_BASE}/replay/stop", timeout=10)
+    except:
+        pass
+    _api_data["active"] = False
+
+
+def poll_loop() -> None:
+    """Hace polling de los datos del replay."""
+    while not _stop_event.is_set():
+        try:
+            status_resp = requests.get(f"{API_BASE}/replay/status", timeout=10)
+            status = status_resp.json()
+
+            if not status.get("replay_active"):
+                print("Replay terminado")
+                break
+
+            step = status.get("replay_step", 0)
+            _api_data["step"] = step
+
+            print(f"Step {step}/{_api_data['total']}")
+
+            if step % 10 == 0:
+                time.sleep(0.5)
+            else:
+                time.sleep(0.1)
+
+        except Exception as e:
+            print(f"Error polling: {e}")
+            time.sleep(0.5)
+
+    _api_data["active"] = False
+
+
+def create_sample_data(tf: str, n: int = 60) -> pd.DataFrame:
+    """Crea datos de ejemplo para testing."""
+    np.random.seed(42)
+
+    start_date = datetime(2026, 2, 1)
+    freq_map = {"1h": "h", "4h": "4h", "1d": "D"}
+    dates = pd.date_range(start=start_date, periods=n, freq=freq_map.get(tf, "h"))
+
+    base_price = 67000
+    returns = np.random.randn(n) * 0.02
+    prices = base_price * np.exp(np.cumsum(returns))
+
+    data = []
+    for i, (date, close) in enumerate(zip(dates, prices)):
+        open_price = close * (1 + np.random.uniform(-0.005, 0.005))
+        high = max(open_price, close) * (1 + abs(np.random.uniform(0, 0.01)))
+        low = min(open_price, close) * (1 - abs(np.random.uniform(0, 0.01)))
+        volume = np.random.randint(500, 2000)
+
+        data.append({
+            "timestamp": date,
+            "open": open_price,
+            "high": high,
+            "low": low,
+            "close": close,
+            "volume": volume,
+        })
+
+    return pd.DataFrame(data)
+
+
+def plot_candlestick(ax: plt.Axes, df: pd.DataFrame, title: str, progress: float = 1.0) -> None:
+    """Grafica velas japonesas."""
+    ax.clear()
+
+    if df is None or df.empty:
+        ax.text(0.5, 0.5, "Sin datos", ha="center", va="center", transform=ax.transAxes, fontsize=14)
+        ax.set_title(title, fontsize=12)
+        return
+
+    n = min(len(df), 60)
+    df = df.tail(n).reset_index(drop=True)
+
+    for i in range(n):
+        row = df.iloc[i]
+        o, h, l, c = row["open"], row["high"], row["low"], row["close"]
+        color = "#26a69a" if c >= o else "#ef5350"
+
+        ax.plot([i, i], [l, h], color=color, linewidth=0.8)
+
+        body_bottom = min(o, c)
+        body_height = abs(c - o)
+        if body_height < 0.1:
+            body_height = max(h - l) * 0.3
+
+        ax.add_patch(plt.Rectangle(
+            (i - 0.35, body_bottom),
+            0.7,
+            body_height,
+            facecolor=color,
+            edgecolor=color,
+            linewidth=0.5,
+        ))
+
+    ax.set_xlim(-1, n)
+    y_min, y_max = df["low"].min() * 0.995, df["high"].max() * 1.005
+    ax.set_ylim(y_min, y_max)
+
+    step = _api_data.get("step", 0)
+    total = _api_data.get("total", 0)
+    ax.set_title(f"{title} | Step: {step}/{total} | Progress: {progress:.0%}", fontsize=12, fontweight="bold")
+    ax.set_ylabel("Price", fontsize=10)
+    ax.grid(True, alpha=0.3)
+
+    ylabel = ax.set_yticks([])
+    for label in ax.get_yticklabels():
+        label.set_fontsize(8)
+
+
+def plot_indicators(ax: plt.Axes, df: pd.DataFrame, title: str) -> None:
+    """Grafica RSI."""
+    ax.clear()
+
+    if df is None or df.empty:
+        ax.text(0.5, 0.5, "Sin datos", ha="center", va="center", transform=ax.transAxes, fontsize=12)
+        ax.set_title(title, fontsize=10)
+        return
+
+    n = min(len(df), 60)
+    df = df.tail(n).reset_index(drop=True)
+
+    if "close" in df.columns:
+        close = df["close"].values
+        delta = np.diff(close)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+
+        window = 14
+        if len(close) >= window:
+            avg_gain = np.convolve(gain, np.ones(window)/window, mode="valid")
+            avg_loss = np.convolve(loss, np.ones(window)/window, mode="valid")
+            rs = avg_gain / (avg_loss + 1e-10)
+            rsi = 100 - (100 / (1 + rs))
+
+            ax.plot(rsi, color="#26a69a", linewidth=1.5, label="RSI(14)")
+            ax.axhline(y=70, color="red", linestyle="--", alpha=0.5, linewidth=0.8)
+            ax.axhline(y=30, color="green", linestyle="--", alpha=0.5, linewidth=0.8)
+            ax.fill_between(range(len(rsi)), 30, 70, alpha=0.1, color="gray")
+
+    ax.set_xlim(-1, n)
+    ax.set_ylim(0, 100)
+    ax.set_title(f"{title}", fontsize=10)
+    ax.set_ylabel("RSI", fontsize=10)
+    ax.legend(loc="upper right", fontsize=8)
+    ax.grid(True, alpha=0.3)
+
+
+def run_mock() -> None:
+    """Ejecuta en modo mock sin API."""
+    print("Ejecutando en MODO MOCK...")
+
+    df_1h = create_sample_data("1h", 60)
+    df_4h = create_sample_data("4h", 60)
+    df_1d = create_sample_data("1d", 60)
+
+    fig = plt.figure(figsize=(14, 10))
+    fig.suptitle("Replay Visualizer - Modo Mock (Test)", fontsize=14, fontweight="bold")
+
+    ax1 = fig.add_subplot(3, 1, 1)
+    plot_candlestick(ax1, df_1h, "1H", progress=1.0)
+
+    ax2 = fig.add_subplot(3, 1, 2)
+    plot_candlestick(ax2, df_4h, "4H", progress=0.5)
+
+    ax3 = fig.add_subplot(3, 1, 3)
+    plot_candlestick(ax3, df_1d, "1D", progress=0.25)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
+    plt.show()
+
+
+def run_with_api() -> None:
+    """Ejecuta con la API real."""
+    print("Iniciando visualización con API...")
+
+    start_replay()
+
+    fig = plt.figure(figsize=(14, 10))
+    fig.suptitle(f"Replay Visualizer - BTC/USDT", fontsize=14, fontweight="bold")
+
+    ax1h = fig.add_subplot(3, 1, 1)
+    ax4h = fig.add_subplot(3, 1, 2)
+    ax1d = fig.add_subplot(3, 1, 3)
+
+    plt.ion()
+    plt.show(block=False)
+
+    poll_thread = threading.Thread(target=poll_loop, daemon=True)
+    poll_thread.start()
+
+    try:
+        while _api_data["active"] and poll_thread.is_alive():
+            step = _api_data.get("step", 0)
+            progress_1h = (step % 100) / 100 if step < 100 else 1.0
+            progress_4h = (step % 4) / 4 if step < 100 else min((step % 4 + 1) / 4, 1.0)
+            progress_1d = (step % 24) / 24 if step < 100 else min((step % 24 + 1) / 24, 1.0)
+
+            plot_candlestick(ax1h, create_sample_data("1h", 60), "1H", progress_1h)
+            plot_candlestick(ax4h, create_sample_data("4h", 60), "4H", progress_4h)
+            plot_candlestick(ax1d, create_sample_data("1d", 60), "1D", progress_1d)
+
+            fig.tight_layout(rect=[0, 0, 1, 0.96])
+            plt.pause(0.5)
+
+    except KeyboardInterrupt:
+        print("\nDeteniendo...")
+    finally:
+        stop_replay()
+        plt.ioff()
+        print("Visualización terminada")
+
+
+def main() -> None:
+    """Main entry point."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Replay Visualizer")
+    parser.add_argument("--mock", action="store_true", help="Modo test sin API")
+    args = parser.parse_args()
+
+    if args.mock:
+        run_mock()
+        return
+
+    try:
+        run_with_api()
+    except Exception as e:
+        print(f"Error: {e}")
+    finally:
+        stop_replay()
+
+
+if __name__ == "__main__":
+    main()
+`````
+
+## File: .env.example
+`````
+# ── Server ──────────────────────────────────────────
+APP_HOST=0.0.0.0
+APP_PORT=8000
+APP_DEBUG=true
+
+# ── Exchange (CCXT) ─────────────────────────────────
+# No API keys needed for public market data
+EXCHANGE_ID=binance
+EXCHANGE_RATE_LIMIT=true
+
+# ── Data Defaults ───────────────────────────────────
+DEFAULT_SYMBOL=BTC/USDT
+DEFAULT_TIMEFRAMES=1h,4h,1d
+
+# ── Tensor ──────────────────────────────────────────
+TENSOR_WINDOW_SIZE=30
+
+# ── Replay ──────────────────────────────────────────
+REPLAY_SPEED_MULTIPLIER=1.0
+REPLAY_REFRESH_SECONDS=5
+`````
+
+## File: .gitignore
+`````
+# ── Python ──────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+
+# ── Virtual Environment ────────────────────────────
+.venv/
+venv/
+env/
+
+# ── Environment Variables ──────────────────────────
+.env
+
+# ── IDE ─────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ── Data Cache ──────────────────────────────────────
+data/cache/
+*.parquet
+*.h5
+
+# ── Logs ────────────────────────────────────────────
+logs/
+*.log
+
+# ── OS ──────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+`````
+
+## File: app/api/routes/data.py
+`````python
+"""
+Data endpoints — historical fetch and real-time latest candles.
+Covers RF-3 (historical) and RF-4 (real-time) exposure via API.
+"""
+
+from fastapi import APIRouter, HTTPException
+
+from app.api.schemas import HistoricalRequest
+from app.core.data_ingestion.historical import HistoricalDataFetcher
+from app.core.data_ingestion.realtime import RealTimeDataFetcher
+
+router = APIRouter(prefix="/data", tags=["Data Ingestion"])
+
+_historical = HistoricalDataFetcher()
+_realtime = RealTimeDataFetcher()
+
+
+@router.post("/historical")
+def fetch_historical(req: HistoricalRequest):
+    """Fetch historical OHLCV data for the given parameters.
+
+    Returns a dict ``{timeframe: [{timestamp, open, high, low, close, volume}, …]}``.
+    """
+    try:
+        result = _historical.fetch_multi_timeframe(
+            symbol=req.symbol,
+            timeframes=req.timeframes,
+            since=req.since,
+            until=req.until,
+        )
+        return {tf: df.to_dict(orient="records") for tf, df in result.items()}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.get("/realtime")
+def fetch_realtime(symbol: str = "BTC/USDT", limit: int = 30):
+    """Fetch the latest *limit* candles across all default timeframes."""
+    try:
+        result = _realtime.fetch_latest_multi_timeframe(symbol=symbol, limit=limit)
+        return {tf: df.to_dict(orient="records") for tf, df in result.items()}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+`````
+
+## File: app/api/routes/tensor.py
+`````python
+"""
+Tensor endpoints — full pipeline execution and metadata inspection.
+Covers RF-8, RF-10, RF-11 and RNF-4 (observability).
+"""
+
+from fastapi import APIRouter, HTTPException
+
+from app.api.schemas import HistoricalRequest, TensorMeta
+from app.core.data_ingestion.historical import HistoricalDataFetcher
+from app.core.processing.indicators import IndicatorEngine
+from app.core.processing.normalizer import Normalizer
+from app.core.sync.multi_timeframe import MultiTimeframeSync
+from app.core.tensor.builder import TensorBuilder
+
+router = APIRouter(prefix="/tensor", tags=["Tensor Pipeline"])
+
+_historical = HistoricalDataFetcher()
+_sync = MultiTimeframeSync()
+_normalizer = Normalizer()
+_builder = TensorBuilder()
+
+
+@router.post("/build", response_model=TensorMeta)
+def build_tensor(req: HistoricalRequest):
+    """Execute the full pipeline: fetch → indicators → sync → normalize → tensor.
+
+    Returns tensor metadata (shape, features). The tensor itself is kept
+    server-side for downstream consumers.
+    """
+    try:
+        # 1. Fetch historical data
+        raw = _historical.fetch_multi_timeframe(
+            symbol=req.symbol,
+            timeframes=req.timeframes,
+            since=req.since,
+            until=req.until,
+        )
+
+        # 2. Compute indicators per timeframe
+        with_indicators = IndicatorEngine.compute_multi_timeframe(raw)
+
+        # 3. Synchronize into a single DataFrame
+        synced = _sync.synchronize(with_indicators)
+        synced = MultiTimeframeSync.add_global_features(synced)
+
+        # 4. Normalize
+        normalized = _normalizer.fit_transform(synced)
+
+        # 5. Build tensor & return metadata
+        meta = _builder.describe(normalized)
+        _builder.build(normalized)  # validates and logs
+
+        return TensorMeta(**meta)
+
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.post("/describe", response_model=TensorMeta)
+def describe_tensor(req: HistoricalRequest):
+    """Dry-run: returns what the tensor shape would be without building it."""
+    try:
+        raw = _historical.fetch_multi_timeframe(
+            symbol=req.symbol,
+            timeframes=req.timeframes,
+            since=req.since,
+            until=req.until,
+        )
+        with_indicators = IndicatorEngine.compute_multi_timeframe(raw)
+        synced = _sync.synchronize(with_indicators)
+        synced = MultiTimeframeSync.add_global_features(synced)
+        return TensorMeta(**_builder.describe(synced))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.get("/indicators")
+def list_indicators():
+    """List all available indicator labels."""
+    return {"indicators": IndicatorEngine.available_indicators()}
+`````
+
+## File: app/api/schemas.py
+`````python
+"""
+Pydantic schemas for API request / response models.
+"""
+
+from pydantic import BaseModel, Field
+
+
+# ── Requests ────────────────────────────────────────
+
+
+class HistoricalRequest(BaseModel):
+    """Parameters for fetching historical OHLCV data."""
+    symbol: str = Field("BTC/USDT", description="Trading pair")
+    timeframes: list[str] = Field(["1h", "4h", "1d"], description="Candle intervals")
+    since: str | None = Field(None, description="Start date ISO-8601 (e.g. 2024-01-01T00:00:00Z)")
+    until: str | None = Field(None, description="End date ISO-8601")
+
+
+class ReplayRequest(BaseModel):
+    """Parameters for starting a market replay session."""
+    symbol: str = Field("BTC/USDT")
+    timeframes: list[str] = Field(["1h", "4h", "1d"])
+    since: str | None = Field(None)
+    until: str | None = Field(None)
+    speed_multiplier: float = Field(1.0, ge=0.1, le=100.0)
+
+
+# ── Responses ───────────────────────────────────────
+
+
+class TensorMeta(BaseModel):
+    """Metadata describing a generated tensor."""
+    window_size: int
+    num_features: int
+    num_rows: int
+    num_windows: int
+    tensor_shape: list[int]
+    feature_columns: list[str]
+
+
+class PipelineStatus(BaseModel):
+    """Current status of the data pipeline."""
+    mode: str  # "idle" | "historical" | "realtime" | "replay"
+    replay_active: bool
+    replay_step: int | None = None
+    replay_total_steps: int | None = None
+
+
+class HealthResponse(BaseModel):
+    """Health-check response."""
+    status: str = "ok"
+    version: str
+`````
+
+## File: app/core/data_ingestion/replay.py
+`````python
+"""
+RF-5: Market Replay — simulate real-time data from historical records.
+
+Uses Darts TimeSeries to create a sliding-window replay that respects
+temporal ordering and mimics the same refresh cadence as real-time mode.
+"""
+
+import asyncio
+from typing import AsyncGenerator
+
+import pandas as pd
+from darts import TimeSeries
+from loguru import logger
+
+from app.config import settings
+
+
+class MarketReplay:
+    """Replay historical OHLCV data as if it were arriving in real time.
+
+    Satisfies RF-5 acceptance criteria:
+    - Respects original temporal order.
+    - Simulates the configured refresh interval.
+    - Can be activated/deactivated via configuration or endpoint.
+    """
+
+    def __init__(
+        self,
+        data: dict[str, pd.DataFrame],
+        window_size: int | None = None,
+        speed_multiplier: float | None = None,
+        refresh_seconds: float | None = None,
+    ):
+        """
+        Args:
+            data: ``{timeframe: DataFrame}`` — historical data per timeframe.
+            window_size: Number of rows per sliding window (default from config).
+            speed_multiplier: Speed factor for replay (1.0 = real-time speed).
+            refresh_seconds: Base interval between emissions in seconds.
+        """
+        self._window_size = window_size or settings.tensor_window_size
+        self._speed = speed_multiplier or settings.replay_speed_multiplier
+        self._refresh = refresh_seconds or settings.replay_refresh_seconds
+        self._active = False
+
+        # Convert DataFrames → Darts TimeSeries for structured windowing
+        self._series: dict[str, TimeSeries] = {}
+        for tf, df in data.items():
+            ts_df = df.copy()
+            ts_df = ts_df.set_index("timestamp").sort_index()
+            # Darts requires a DatetimeIndex with a frequency
+            ts_df.index = pd.DatetimeIndex(ts_df.index)
+            self._series[tf] = TimeSeries.from_dataframe(
+                ts_df,
+                value_cols=["open", "high", "low", "close", "volume"],
+                fill_missing_dates=True,
+                freq=None,  # let Darts infer
+            )
+
+        # Determine max replay steps from the shortest series
+        min_len = min(len(s) for s in self._series.values())
+        self._max_steps = max(0, min_len - self._window_size)
+
+        logger.info(
+            "MarketReplay initialized — window={}, speed={}×, steps={}",
+            self._window_size,
+            self._speed,
+            self._max_steps,
+        )
+
+    # ── Public API ──────────────────────────────────
+
+    async def stream(self) -> AsyncGenerator[dict[str, pd.DataFrame], None]:
+        """Async generator that yields one window per step.
+
+        Yields:
+            ``{timeframe: DataFrame}`` — sliding window for each timeframe.
+        """
+        self._active = True
+        delay = self._refresh / self._speed
+
+        for step in range(self._max_steps):
+            if not self._active:
+                logger.info("Replay stopped at step {}/{}", step, self._max_steps)
+                return
+
+            window: dict[str, pd.DataFrame] = {}
+            for tf, ts in self._series.items():
+                sliced = ts[step : step + self._window_size]
+                window[tf] = sliced.pd_dataframe()
+
+            logger.debug("Replay step {}/{}", step + 1, self._max_steps)
+            yield window
+            await asyncio.sleep(delay)
+
+        self._active = False
+        logger.success("Replay completed — {} steps emitted", self._max_steps)
+
+    def stop(self) -> None:
+        """Stop the replay mid-stream."""
+        self._active = False
+
+    @property
+    def is_active(self) -> bool:
+        """Check if replay is currently running."""
+        return self._active
+
+    @property
+    def total_steps(self) -> int:
+        """Total number of replay steps available."""
+        return self._max_steps
+`````
+
+## File: app/core/processing/normalizer.py
+`````python
+"""
+RF-9: Data normalization strategies.
+
+Applies the appropriate normalization method depending on feature type:
+- Bounded indicators (RSI, Stochastic) → Min-Max [0, 1]
+- Prices and returns                   → Z-Score
+- Volumes                              → Log scaling + standardization
+"""
+
+import numpy as np
+import pandas as pd
+from loguru import logger
+
+
+class Normalizer:
+    """Apply column-aware normalization to a feature DataFrame.
+
+    Stores fitted parameters (mean, std, min, max) so the same transform
+    can be applied identically on future data (RNF-2 reproducibility).
+    """
+
+    # Columns containing these substrings use specific strategies.
+    _BOUNDED_KEYWORDS = {"Ind3", "Ind10"}  # RSI, Stochastic → Min-Max
+    _VOLUME_KEYWORDS = {"volume", "Ind9"}  # Volume, OBV → Log-scale
+    # Everything else → Z-Score
+
+    def __init__(self):
+        self._params: dict[str, dict] = {}  # {col: {method, ...fitted_values}}
+
+    # ── Public API ──────────────────────────────────
+
+    def fit_transform(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Fit on *df* and return the normalized copy.
+
+        Args:
+            df: DataFrame of numeric features (excludes ``timestamp``).
+
+        Returns:
+            Normalized DataFrame with the same shape and columns.
+        """
+        result = df.copy()
+        numeric_cols = result.select_dtypes(include=[np.number]).columns
+
+        for col in numeric_cols:
+            method = self._detect_method(col)
+            result[col] = self._apply(result[col], col, method, fit=True)
+
+        logger.debug("Fit & transformed {} numeric columns", len(numeric_cols))
+        return result
+
+    def transform(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Transform *df* using previously fitted parameters.
+
+        Args:
+            df: DataFrame with the same columns used in ``fit_transform``.
+
+        Returns:
+            Normalized DataFrame.
+        """
+        result = df.copy()
+        numeric_cols = result.select_dtypes(include=[np.number]).columns
+
+        for col in numeric_cols:
+            if col not in self._params:
+                logger.warning("Column {} was not fitted — skipping", col)
+                continue
+            method = self._params[col]["method"]
+            result[col] = self._apply(result[col], col, method, fit=False)
+
+        return result
+
+    # ── Internal ────────────────────────────────────
+
+    def _detect_method(self, col: str) -> str:
+        """Heuristic to select normalization method based on column name."""
+        for kw in self._BOUNDED_KEYWORDS:
+            if kw in col:
+                return "minmax"
+        for kw in self._VOLUME_KEYWORDS:
+            if kw.lower() in col.lower():
+                return "log"
+        return "zscore"
+
+    def _apply(self, series: pd.Series, col: str, method: str, fit: bool) -> pd.Series:
+        if method == "minmax":
+            return self._minmax(series, col, fit)
+        elif method == "log":
+            return self._log_scale(series, col, fit)
+        else:
+            return self._zscore(series, col, fit)
+
+    def _minmax(self, s: pd.Series, col: str, fit: bool) -> pd.Series:
+        if fit:
+            mn, mx = s.min(), s.max()
+            self._params[col] = {"method": "minmax", "min": mn, "max": mx}
+        else:
+            mn = self._params[col]["min"]
+            mx = self._params[col]["max"]
+        rng = mx - mn
+        if rng == 0:
+            return pd.Series(0.0, index=s.index)
+        return (s - mn) / rng
+
+    def _zscore(self, s: pd.Series, col: str, fit: bool) -> pd.Series:
+        if fit:
+            mean, std = s.mean(), s.std()
+            self._params[col] = {"method": "zscore", "mean": mean, "std": std}
+        else:
+            mean = self._params[col]["mean"]
+            std = self._params[col]["std"]
+        if std == 0:
+            return pd.Series(0.0, index=s.index)
+        return (s - mean) / std
+
+    def _log_scale(self, s: pd.Series, col: str, fit: bool) -> pd.Series:
+        logged = np.log1p(s.clip(lower=0))
+        if fit:
+            mean, std = logged.mean(), logged.std()
+            self._params[col] = {"method": "log", "mean": mean, "std": std}
+        else:
+            mean = self._params[col]["mean"]
+            std = self._params[col]["std"]
+        if std == 0:
+            return pd.Series(0.0, index=s.index)
+        return (logged - mean) / std
+
+    @property
+    def fitted_params(self) -> dict[str, dict]:
+        """Return a copy of the fitted normalization parameters."""
+        return dict(self._params)
+`````
+
+## File: app/core/sync/multi_timeframe.py
+`````python
+"""
+RF-7: Multi-timeframe synchronization.
+
+Aligns 1h, 4h, and daily candle data into a single coherent row
+so that every row of the tensor represents the same market instant.
+"""
+
+import pandas as pd
+from loguru import logger
+
+
+class MultiTimeframeSync:
+    """Synchronize OHLCV DataFrames from different timeframes into one aligned table.
+
+    Alignment rules (RF-7):
+    - 4 candles of 1h  ≡ 1 candle of 4h.
+    - 24 candles of 1h ≡ 1 candle of 1d.
+    - Each row represents the *same* market instant.
+
+    Strategy: use the 1h timeframe as the master clock and forward-fill
+    the higher timeframes so each 1h row carries the most recent 4h/1d values.
+    """
+
+    # Mapping from standard config labels to canonical names
+    _TF_CANONICAL = {"1h": "1h", "4h": "4h", "1d": "1d", "1D": "1d"}
+
+    def __init__(self, base_timeframe: str = "1h"):
+        self._base = base_timeframe
+
+    # ── Public API ──────────────────────────────────
+
+    def synchronize(self, data: dict[str, pd.DataFrame]) -> pd.DataFrame:
+        """Merge multiple timeframes into a single aligned DataFrame.
+        
+        Only adds timeframe suffix to OHLCV columns (open, high, low, close, volume, progress_vela).
+        Indicator columns (already with suffix like RSI_1h, EMA_50_4h) are kept as-is.
+        """
+        if self._base not in data:
+            raise ValueError(f"Base timeframe '{self._base}' not found in data keys: {list(data.keys())}")
+
+        base_df = data[self._base].copy()
+        base_df = base_df.set_index("timestamp").sort_index()
+
+        ohlcv_cols = {"open", "high", "low", "close", "volume", "progress_vela"}
+        
+        for col in list(base_df.columns):
+            if col in ohlcv_cols and not col.endswith(f"_{self._base}"):
+                base_df.rename(columns={col: f"{col}_{self._base}"}, inplace=True)
+
+        for tf, df in data.items():
+            canonical = self._TF_CANONICAL.get(tf, tf)
+            if canonical == self._base:
+                continue
+
+            higher = df.copy()
+            higher = higher.set_index("timestamp").sort_index()
+            
+            for col in list(higher.columns):
+                if col in ohlcv_cols and not col.endswith(f"_{canonical}"):
+                    higher.rename(columns={col: f"{col}_{canonical}"}, inplace=True)
+
+            higher = higher.reindex(base_df.index, method="ffill")
+            base_df = base_df.join(higher, how="left")
+
+        base_df = base_df.ffill()
+
+        logger.info(
+            "Synchronized {} timeframes → {} rows × {} cols",
+            len(data),
+            len(base_df),
+            len(base_df.columns),
+        )
+        return base_df
+
+    @staticmethod
+    def add_global_features(df: pd.DataFrame) -> pd.DataFrame:
+        """Append global features required by RF-11.
+
+        Adds:
+        - ``precio_actual``: latest close from the 1h column.
+        - ``tiempo_normalizado``: hour-of-day / 24, capturing intraday position.
+        """
+        result = df.copy()
+
+        # Current price = most recent 1h close at that row
+        close_1h_col = [c for c in result.columns if c.startswith("close") and "1h" in c]
+        if close_1h_col:
+            result["precio_actual"] = result[close_1h_col[0]]
+
+        # Normalized time (hour / 24)
+        result["tiempo_normalizado"] = result.index.hour / 24.0
+
+        return result
+`````
+
+## File: repomix-output.xml
+`````xml
+This file is a merged representation of the entire codebase, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+.env.example
+.gitignore
+app/__init__.py
+app/api/__init__.py
+app/api/routes/__init__.py
+app/api/routes/data.py
+app/api/routes/replay.py
+app/api/routes/tensor.py
+app/api/schemas.py
+app/config.py
+app/core/__init__.py
+app/core/data_ingestion/__init__.py
+app/core/data_ingestion/historical.py
+app/core/data_ingestion/realtime.py
+app/core/data_ingestion/replay.py
+app/core/processing/__init__.py
+app/core/processing/indicators.py
+app/core/processing/normalizer.py
+app/core/sync/__init__.py
+app/core/sync/multi_timeframe.py
+app/core/tensor/__init__.py
+app/core/tensor/builder.py
+app/main.py
+app/utils/__init__.py
+app/utils/logger.py
+mi-resumen.md
+README.md
+requirements.txt
+requisitos ia 1.docx
+run.py
+tests/__init__.py
+tests/test_api_health.py
+tests/test_normalizer.py
+tests/test_tensor_builder.py
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path=".env.example">
+# ── Server ──────────────────────────────────────────
+APP_HOST=0.0.0.0
+APP_PORT=8000
+APP_DEBUG=true
+
+# ── Exchange (CCXT) ─────────────────────────────────
+# No API keys needed for public market data
+EXCHANGE_ID=binance
+EXCHANGE_RATE_LIMIT=true
+
+# ── Data Defaults ───────────────────────────────────
+DEFAULT_SYMBOL=BTC/USDT
+DEFAULT_TIMEFRAMES=1h,4h,1d
+
+# ── Tensor ──────────────────────────────────────────
+TENSOR_WINDOW_SIZE=30
+
+# ── Replay ──────────────────────────────────────────
+REPLAY_SPEED_MULTIPLIER=1.0
+REPLAY_REFRESH_SECONDS=5
+</file>
+
+<file path=".gitignore">
+# ── Python ──────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+
+# ── Virtual Environment ────────────────────────────
+.venv/
+venv/
+env/
+
+# ── Environment Variables ──────────────────────────
+.env
+
+# ── IDE ─────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ── Data Cache ──────────────────────────────────────
+data/cache/
+*.parquet
+*.h5
+
+# ── Logs ────────────────────────────────────────────
+logs/
+*.log
+
+# ── OS ──────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+</file>
+
+<file path="app/__init__.py">
+"""IA-APP: AI Trading Data Pipeline — Phase 1."""
+
+__version__ = "0.1.0"
+</file>
+
+<file path="app/api/__init__.py">
+"""API package: routes and schemas."""
+</file>
+
+<file path="app/api/routes/__init__.py">
+"""API route modules."""
+</file>
+
+<file path="app/api/routes/data.py">
+"""
+Data endpoints — historical fetch and real-time latest candles.
+Covers RF-3 (historical) and RF-4 (real-time) exposure via API.
+"""
+
+from fastapi import APIRouter, HTTPException
+
+from app.api.schemas import HistoricalRequest
+from app.core.data_ingestion.historical import HistoricalDataFetcher
+from app.core.data_ingestion.realtime import RealTimeDataFetcher
+
+router = APIRouter(prefix="/data", tags=["Data Ingestion"])
+
+_historical = HistoricalDataFetcher()
+_realtime = RealTimeDataFetcher()
+
+
+@router.post("/historical")
+def fetch_historical(req: HistoricalRequest):
+    """Fetch historical OHLCV data for the given parameters.
+
+    Returns a dict ``{timeframe: [{timestamp, open, high, low, close, volume}, …]}``.
+    """
+    try:
+        result = _historical.fetch_multi_timeframe(
+            symbol=req.symbol,
+            timeframes=req.timeframes,
+            since=req.since,
+            until=req.until,
+        )
+        return {tf: df.to_dict(orient="records") for tf, df in result.items()}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.get("/realtime")
+def fetch_realtime(symbol: str = "BTC/USDT", limit: int = 30):
+    """Fetch the latest *limit* candles across all default timeframes."""
+    try:
+        result = _realtime.fetch_latest_multi_timeframe(symbol=symbol, limit=limit)
+        return {tf: df.to_dict(orient="records") for tf, df in result.items()}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+</file>
+
+<file path="app/api/routes/replay.py">
+"""
+Replay endpoints — start, stop, and status of market replay sessions.
+Covers RF-5 (Market Replay) exposure via API.
+"""
+
+import asyncio
+
+from fastapi import APIRouter, HTTPException
+
+from app.api.schemas import PipelineStatus, ReplayRequest
+from app.core.data_ingestion.historical import HistoricalDataFetcher
+from app.core.data_ingestion.replay import MarketReplay
+
+router = APIRouter(prefix="/replay", tags=["Market Replay"])
+
+_historical = HistoricalDataFetcher()
+_current_replay: MarketReplay | None = None
+_replay_step: int = 0
+
+
+@router.post("/start")
+async def start_replay(req: ReplayRequest):
+    """Start a new market replay session from historical data.
+
+    Fetches the requested range, creates a ``MarketReplay`` instance,
+    and begins streaming windows in the background.
+    """
+    global _current_replay, _replay_step
+
+    if _current_replay and _current_replay.is_active:
+        raise HTTPException(status_code=409, detail="Replay already running — stop it first")
+
+    try:
+        raw = _historical.fetch_multi_timeframe(
+            symbol=req.symbol,
+            timeframes=req.timeframes,
+            since=req.since,
+            until=req.until,
+        )
+        _current_replay = MarketReplay(
+            data=raw,
+            speed_multiplier=req.speed_multiplier,
+        )
+        _replay_step = 0
+
+        # Run replay in the background
+        asyncio.create_task(_run_replay())
+
+        return {
+            "status": "started",
+            "total_steps": _current_replay.total_steps,
+            "speed": req.speed_multiplier,
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.post("/stop")
+def stop_replay():
+    """Stop the currently running replay."""
+    global _current_replay
+    if _current_replay:
+        _current_replay.stop()
+        return {"status": "stopped", "step": _replay_step}
+    return {"status": "no_replay_running"}
+
+
+@router.get("/status", response_model=PipelineStatus)
+def replay_status():
+    """Return the current replay status."""
+    active = _current_replay.is_active if _current_replay else False
+    return PipelineStatus(
+        mode="replay" if active else "idle",
+        replay_active=active,
+        replay_step=_replay_step if active else None,
+        replay_total_steps=_current_replay.total_steps if _current_replay else None,
+    )
+
+
+# ── Background Task ────────────────────────────────
+
+async def _run_replay():
+    """Consume the replay stream in the background."""
+    global _replay_step
+    if not _current_replay:
+        return
+    async for _window in _current_replay.stream():
+        _replay_step += 1
+</file>
+
+<file path="app/api/routes/tensor.py">
+"""
+Tensor endpoints — full pipeline execution and metadata inspection.
+Covers RF-8, RF-10, RF-11 and RNF-4 (observability).
+"""
+
+from fastapi import APIRouter, HTTPException
+
+from app.api.schemas import HistoricalRequest, TensorMeta
+from app.core.data_ingestion.historical import HistoricalDataFetcher
+from app.core.processing.indicators import IndicatorEngine
+from app.core.processing.normalizer import Normalizer
+from app.core.sync.multi_timeframe import MultiTimeframeSync
+from app.core.tensor.builder import TensorBuilder
+
+router = APIRouter(prefix="/tensor", tags=["Tensor Pipeline"])
+
+_historical = HistoricalDataFetcher()
+_sync = MultiTimeframeSync()
+_normalizer = Normalizer()
+_builder = TensorBuilder()
+
+
+@router.post("/build", response_model=TensorMeta)
+def build_tensor(req: HistoricalRequest):
+    """Execute the full pipeline: fetch → indicators → sync → normalize → tensor.
+
+    Returns tensor metadata (shape, features). The tensor itself is kept
+    server-side for downstream consumers.
+    """
+    try:
+        # 1. Fetch historical data
+        raw = _historical.fetch_multi_timeframe(
+            symbol=req.symbol,
+            timeframes=req.timeframes,
+            since=req.since,
+            until=req.until,
+        )
+
+        # 2. Compute indicators per timeframe
+        with_indicators = IndicatorEngine.compute_multi_timeframe(raw)
+
+        # 3. Synchronize into a single DataFrame
+        synced = _sync.synchronize(with_indicators)
+        synced = MultiTimeframeSync.add_global_features(synced)
+
+        # 4. Normalize
+        normalized = _normalizer.fit_transform(synced)
+
+        # 5. Build tensor & return metadata
+        meta = _builder.describe(normalized)
+        _builder.build(normalized)  # validates and logs
+
+        return TensorMeta(**meta)
+
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.post("/describe", response_model=TensorMeta)
+def describe_tensor(req: HistoricalRequest):
+    """Dry-run: returns what the tensor shape would be without building it."""
+    try:
+        raw = _historical.fetch_multi_timeframe(
+            symbol=req.symbol,
+            timeframes=req.timeframes,
+            since=req.since,
+            until=req.until,
+        )
+        with_indicators = IndicatorEngine.compute_multi_timeframe(raw)
+        synced = _sync.synchronize(with_indicators)
+        synced = MultiTimeframeSync.add_global_features(synced)
+        return TensorMeta(**_builder.describe(synced))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.get("/indicators")
+def list_indicators():
+    """List all available indicator labels."""
+    return {"indicators": IndicatorEngine.available_indicators()}
+</file>
+
+<file path="app/api/schemas.py">
+"""
+Pydantic schemas for API request / response models.
+"""
+
+from pydantic import BaseModel, Field
+
+
+# ── Requests ────────────────────────────────────────
+
+
+class HistoricalRequest(BaseModel):
+    """Parameters for fetching historical OHLCV data."""
+    symbol: str = Field("BTC/USDT", description="Trading pair")
+    timeframes: list[str] = Field(["1h", "4h", "1d"], description="Candle intervals")
+    since: str | None = Field(None, description="Start date ISO-8601 (e.g. 2024-01-01T00:00:00Z)")
+    until: str | None = Field(None, description="End date ISO-8601")
+
+
+class ReplayRequest(BaseModel):
+    """Parameters for starting a market replay session."""
+    symbol: str = Field("BTC/USDT")
+    timeframes: list[str] = Field(["1h", "4h", "1d"])
+    since: str | None = Field(None)
+    until: str | None = Field(None)
+    speed_multiplier: float = Field(1.0, ge=0.1, le=100.0)
+
+
+# ── Responses ───────────────────────────────────────
+
+
+class TensorMeta(BaseModel):
+    """Metadata describing a generated tensor."""
+    window_size: int
+    num_features: int
+    num_rows: int
+    num_windows: int
+    tensor_shape: list[int]
+    feature_columns: list[str]
+
+
+class PipelineStatus(BaseModel):
+    """Current status of the data pipeline."""
+    mode: str  # "idle" | "historical" | "realtime" | "replay"
+    replay_active: bool
+    replay_step: int | None = None
+    replay_total_steps: int | None = None
+
+
+class HealthResponse(BaseModel):
+    """Health-check response."""
+    status: str = "ok"
+    version: str
+</file>
+
+<file path="app/config.py">
+"""
+Centralized application configuration.
+Loads settings from .env file and environment variables.
+Covers RF-1 (environment isolation) requirements.
+"""
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    """Application-wide settings loaded from .env / environment."""
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+    )
+
+    # ── Server ──────────────────────────────────────
+    app_host: str = "0.0.0.0"
+    app_port: int = 8000
+    app_debug: bool = True
+
+    # ── Exchange ────────────────────────────────────
+    exchange_id: str = "binance"
+    exchange_rate_limit: bool = True
+
+    # ── Data ────────────────────────────────────────
+    default_symbol: str = "BTC/USDT"
+    default_timeframes: str = "1h,4h,1d"
+
+    # ── Tensor ──────────────────────────────────────
+    tensor_window_size: int = 30
+
+    # ── Replay ──────────────────────────────────────
+    replay_speed_multiplier: float = 1.0
+    replay_refresh_seconds: float = 5.0
+
+    @property
+    def timeframes_list(self) -> list[str]:
+        """Return timeframes as a clean list."""
+        return [tf.strip() for tf in self.default_timeframes.split(",")]
+
+
+settings = Settings()
+</file>
+
+<file path="app/core/__init__.py">
+"""Core business logic package."""
+</file>
+
+<file path="app/core/data_ingestion/__init__.py">
+"""Data ingestion sub-package: historical, real-time & replay."""
+</file>
+
+<file path="app/core/data_ingestion/historical.py">
+"""
+RF-3: Historical market data extraction via CCXT.
+
+Fetches OHLCV candle data from Binance (or any CCXT-supported exchange)
+with automatic pagination, chronological ordering, and reproducibility.
+
+Includes fallback exchanges and retry logic for geo-restricted regions.
+"""
+
+import time
+from datetime import datetime
+
+import ccxt
+import pandas as pd
+from loguru import logger
+
+from app.config import settings
+
+# Ordered fallback list — tried in sequence if the primary fails.
+_EXCHANGE_FALLBACKS = ["binance", "binanceus", "bybit", "okx", "kraken"]
+
+
+class HistoricalDataFetcher:
+    """Fetch historical OHLCV data from a cryptocurrency exchange.
+
+    Handles automatic pagination, rate-limiting, chronological ordering,
+    and exchange fallback to satisfy RF-3 acceptance criteria.
+    """
+
+    OHLCV_COLUMNS = ["timestamp", "open", "high", "low", "close", "volume"]
+
+    def __init__(self, exchange_id: str | None = None):
+        preferred = exchange_id or settings.exchange_id
+        self._exchange = self._init_exchange(preferred)
+        logger.info(
+            "HistoricalDataFetcher ready — using {}",
+            self._exchange.id,
+        )
+
+    # ── Exchange Initialization ─────────────────────
+
+    @staticmethod
+    def _init_exchange(preferred: str) -> ccxt.Exchange:
+        """Try to initialize and load markets for the preferred exchange.
+
+        Falls back through ``_EXCHANGE_FALLBACKS`` if the preferred one
+        is unreachable (geo-block, DNS failure, etc.).
+        """
+        candidates = [preferred] + [
+            ex for ex in _EXCHANGE_FALLBACKS if ex != preferred
+        ]
+
+        for eid in candidates:
+            try:
+                exchange_class = getattr(ccxt, eid, None)
+                if exchange_class is None:
+                    continue
+                exchange = exchange_class(
+                    {"enableRateLimit": settings.exchange_rate_limit}
+                )
+                exchange.load_markets()
+                logger.debug("Exchange {} connected successfully", eid)
+                return exchange
+            except Exception as exc:
+                logger.warning(
+                    "Exchange {} unavailable ({}), trying next…", eid, exc
+                )
+
+        raise RuntimeError(
+            f"No exchange reachable. Tried: {candidates}. "
+            "Check your internet connection or configure a VPN."
+        )
+
+    # ── Public API ──────────────────────────────────
+
+    def fetch(
+        self,
+        symbol: str | None = None,
+        timeframe: str = "1h",
+        since: str | datetime | None = None,
+        until: str | datetime | None = None,
+        limit_per_request: int = 1000,
+        max_retries: int = 3,
+    ) -> pd.DataFrame:
+        """Fetch paginated OHLCV data and return a clean DataFrame.
+
+        Args:
+            symbol: Trading pair, e.g. ``"BTC/USDT"``.
+            timeframe: Candle interval (``1h``, ``4h``, ``1d``).
+            since: Start datetime or ISO-8601 string.
+            until: End datetime or ISO-8601 string (defaults to now).
+            limit_per_request: Max candles per API call (exchange limit).
+            max_retries: Number of retry attempts per request on failure.
+
+        Returns:
+            ``pd.DataFrame`` with columns ``[timestamp, open, high, low, close, volume]``,
+            sorted chronologically.
+        """
+        symbol = symbol or settings.default_symbol
+        since_ms = self._to_ms(since) if since else None
+        until_ms = self._to_ms(until) if until else None
+
+        logger.info(
+            "Fetching {} {} | since={} until={}",
+            symbol,
+            timeframe,
+            since,
+            until,
+        )
+
+        all_candles: list[list] = []
+        while True:
+            batch = self._fetch_with_retry(
+                symbol, timeframe, since_ms, limit_per_request, max_retries
+            )
+            if not batch:
+                break
+
+            # Filter candles that exceed *until*
+            if until_ms:
+                batch = [c for c in batch if c[0] <= until_ms]
+                if not batch:
+                    break
+
+            all_candles.extend(batch)
+
+            # Advance cursor past the last candle
+            since_ms = batch[-1][0] + 1
+
+            if len(batch) < limit_per_request:
+                break
+
+        df = pd.DataFrame(all_candles, columns=self.OHLCV_COLUMNS)
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+        df = (
+            df.drop_duplicates(subset=["timestamp"])
+            .sort_values("timestamp")
+            .reset_index(drop=True)
+        )
+
+        logger.success("{} candles fetched for {} {}", len(df), symbol, timeframe)
+        return df
+
+    # ── Helpers ──────────────────────────────────────
+
+    def _fetch_with_retry(
+        self,
+        symbol: str,
+        timeframe: str,
+        since_ms: int | None,
+        limit: int,
+        max_retries: int,
+    ) -> list[list]:
+        """Fetch a single batch with exponential backoff retry."""
+        for attempt in range(1, max_retries + 1):
+            try:
+                return self._exchange.fetch_ohlcv(
+                    symbol, timeframe, since=since_ms, limit=limit
+                )
+            except (ccxt.NetworkError, ccxt.ExchangeNotAvailable) as exc:
+                wait = 2**attempt
+                logger.warning(
+                    "Retry {}/{} for {} {} — {} — waiting {}s",
+                    attempt,
+                    max_retries,
+                    symbol,
+                    timeframe,
+                    exc,
+                    wait,
+                )
+                time.sleep(wait)
+            except ccxt.ExchangeError as exc:
+                logger.error("Exchange error (non-retryable): {}", exc)
+                raise
+        logger.error("All {} retries exhausted", max_retries)
+        return []
+
+    def _to_ms(self, dt: str | datetime) -> int:
+        """Convert a datetime or ISO string to Unix milliseconds."""
+        if isinstance(dt, str):
+            return self._exchange.parse8601(dt)
+        return int(dt.timestamp() * 1000)
+
+    def fetch_multi_timeframe(
+        self,
+        symbol: str | None = None,
+        timeframes: list[str] | None = None,
+        since: str | datetime | None = None,
+        until: str | datetime | None = None,
+    ) -> dict[str, pd.DataFrame]:
+        """Fetch OHLCV for multiple timeframes.
+
+        Returns:
+            Dictionary ``{timeframe: DataFrame}``.
+        """
+        symbol = symbol or settings.default_symbol
+        timeframes = timeframes or settings.timeframes_list
+
+        results: dict[str, pd.DataFrame] = {}
+        for tf in timeframes:
+            results[tf] = self.fetch(
+                symbol=symbol, timeframe=tf, since=since, until=until
+            )
+        return results
+</file>
+
+<file path="app/core/data_ingestion/realtime.py">
+"""
+RF-4: Real-time market data extraction.
+
+Provides periodic polling of current OHLCV candles (including
+unclosed candles with provisional close = current price).
+Auto-refreshes every 15 minutes as specified in RF-4.
+"""
+
+import asyncio
+from datetime import datetime, timezone
+
+import ccxt
+import pandas as pd
+from loguru import logger
+
+from app.config import settings
+from app.core.data_ingestion.historical import HistoricalDataFetcher
+
+
+class RealTimeDataFetcher:
+    """Periodically fetch the latest OHLCV candles for all configured timeframes.
+
+    Satisfies RF-4 acceptance criteria:
+    - Auto-refresh every 15 minutes.
+    - Retrieves unclosed candles (1h, 4h, 1d) with current price as provisional close.
+    """
+
+    OHLCV_COLUMNS = ["timestamp", "open", "high", "low", "close", "volume"]
+    REFRESH_INTERVAL_SECONDS = 15 * 60  # 15 minutes
+
+    def __init__(self, exchange_id: str | None = None):
+        # Reuse the same fallback logic from HistoricalDataFetcher
+        self._exchange = HistoricalDataFetcher._init_exchange(
+            exchange_id or settings.exchange_id
+        )
+        self._latest: dict[str, pd.DataFrame] = {}
+        self._running = False
+        logger.info("RealTimeDataFetcher ready — using {}", self._exchange.id)
+
+    # ── Public API ──────────────────────────────────
+
+    def fetch_latest(
+        self,
+        symbol: str | None = None,
+        timeframe: str = "1h",
+        limit: int = 30,
+    ) -> pd.DataFrame:
+        """Fetch the most recent *limit* candles (includes unclosed current candle).
+
+        Args:
+            symbol: Trading pair.
+            timeframe: Candle interval.
+            limit: Number of candles to retrieve.
+
+        Returns:
+            DataFrame with the latest candles.
+        """
+        symbol = symbol or settings.default_symbol
+        raw = self._exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+        df = pd.DataFrame(raw, columns=self.OHLCV_COLUMNS)
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+        return df
+
+    def fetch_latest_multi_timeframe(
+        self,
+        symbol: str | None = None,
+        timeframes: list[str] | None = None,
+        limit: int = 30,
+    ) -> dict[str, pd.DataFrame]:
+        """Fetch latest candles across all configured timeframes."""
+        symbol = symbol or settings.default_symbol
+        timeframes = timeframes or settings.timeframes_list
+
+        result: dict[str, pd.DataFrame] = {}
+        for tf in timeframes:
+            result[tf] = self.fetch_latest(symbol=symbol, timeframe=tf, limit=limit)
+        return result
+
+    # ── Background Polling Loop ─────────────────────
+
+    async def start_polling(
+        self,
+        symbol: str | None = None,
+        timeframes: list[str] | None = None,
+    ) -> None:
+        """Start an async loop that refreshes data every 15 min."""
+        symbol = symbol or settings.default_symbol
+        timeframes = timeframes or settings.timeframes_list
+        self._running = True
+
+        logger.info("Real-time polling started — every {}s", self.REFRESH_INTERVAL_SECONDS)
+        while self._running:
+            try:
+                self._latest = self.fetch_latest_multi_timeframe(
+                    symbol=symbol, timeframes=timeframes
+                )
+                logger.debug(
+                    "Refreshed real-time data at {}",
+                    datetime.now(timezone.utc).isoformat(),
+                )
+            except Exception as exc:
+                logger.error("Real-time fetch error: {}", exc)
+            await asyncio.sleep(self.REFRESH_INTERVAL_SECONDS)
+
+    def stop_polling(self) -> None:
+        """Stop the background polling loop."""
+        self._running = False
+        logger.info("Real-time polling stopped")
+
+    @property
+    def latest_data(self) -> dict[str, pd.DataFrame]:
+        """Return the most recently cached data."""
+        return self._latest
+</file>
+
+<file path="app/core/data_ingestion/replay.py">
+"""
+RF-5: Market Replay — simulate real-time data from historical records.
+
+Uses Darts TimeSeries to create a sliding-window replay that respects
+temporal ordering and mimics the same refresh cadence as real-time mode.
+"""
+
+import asyncio
+from typing import AsyncGenerator
+
+import pandas as pd
+from darts import TimeSeries
+from loguru import logger
+
+from app.config import settings
+
+
+class MarketReplay:
+    """Replay historical OHLCV data as if it were arriving in real time.
+
+    Satisfies RF-5 acceptance criteria:
+    - Respects original temporal order.
+    - Simulates the configured refresh interval.
+    - Can be activated/deactivated via configuration or endpoint.
+    """
+
+    def __init__(
+        self,
+        data: dict[str, pd.DataFrame],
+        window_size: int | None = None,
+        speed_multiplier: float | None = None,
+        refresh_seconds: float | None = None,
+    ):
+        """
+        Args:
+            data: ``{timeframe: DataFrame}`` — historical data per timeframe.
+            window_size: Number of rows per sliding window (default from config).
+            speed_multiplier: Speed factor for replay (1.0 = real-time speed).
+            refresh_seconds: Base interval between emissions in seconds.
+        """
+        self._window_size = window_size or settings.tensor_window_size
+        self._speed = speed_multiplier or settings.replay_speed_multiplier
+        self._refresh = refresh_seconds or settings.replay_refresh_seconds
+        self._active = False
+
+        # Convert DataFrames → Darts TimeSeries for structured windowing
+        self._series: dict[str, TimeSeries] = {}
+        for tf, df in data.items():
+            ts_df = df.copy()
+            ts_df = ts_df.set_index("timestamp").sort_index()
+            # Darts requires a DatetimeIndex with a frequency
+            ts_df.index = pd.DatetimeIndex(ts_df.index)
+            self._series[tf] = TimeSeries.from_dataframe(
+                ts_df,
+                value_cols=["open", "high", "low", "close", "volume"],
+                fill_missing_dates=True,
+                freq=None,  # let Darts infer
+            )
+
+        # Determine max replay steps from the shortest series
+        min_len = min(len(s) for s in self._series.values())
+        self._max_steps = max(0, min_len - self._window_size)
+
+        logger.info(
+            "MarketReplay initialized — window={}, speed={}×, steps={}",
+            self._window_size,
+            self._speed,
+            self._max_steps,
+        )
+
+    # ── Public API ──────────────────────────────────
+
+    async def stream(self) -> AsyncGenerator[dict[str, pd.DataFrame], None]:
+        """Async generator that yields one window per step.
+
+        Yields:
+            ``{timeframe: DataFrame}`` — sliding window for each timeframe.
+        """
+        self._active = True
+        delay = self._refresh / self._speed
+
+        for step in range(self._max_steps):
+            if not self._active:
+                logger.info("Replay stopped at step {}/{}", step, self._max_steps)
+                return
+
+            window: dict[str, pd.DataFrame] = {}
+            for tf, ts in self._series.items():
+                sliced = ts[step : step + self._window_size]
+                window[tf] = sliced.pd_dataframe()
+
+            logger.debug("Replay step {}/{}", step + 1, self._max_steps)
+            yield window
+            await asyncio.sleep(delay)
+
+        self._active = False
+        logger.success("Replay completed — {} steps emitted", self._max_steps)
+
+    def stop(self) -> None:
+        """Stop the replay mid-stream."""
+        self._active = False
+
+    @property
+    def is_active(self) -> bool:
+        """Check if replay is currently running."""
+        return self._active
+
+    @property
+    def total_steps(self) -> int:
+        """Total number of replay steps available."""
+        return self._max_steps
+</file>
+
+<file path="app/core/processing/__init__.py">
+"""Data processing sub-package: indicators & normalization."""
+</file>
+
+<file path="app/core/processing/indicators.py">
+"""
+RF-6: Technical indicator calculation using the ``ta`` library.
+
+Computes indicators per timeframe and appends them as independent features
+(columns) to the OHLCV DataFrame.  Indicators are labelled anonymously
+(Ind1, Ind2, …) to satisfy RF-11 column-standard requirements.
+"""
+
+import pandas as pd
+import ta
+from loguru import logger
+
+
+class IndicatorEngine:
+    """Calculate technical indicators on OHLCV DataFrames.
+
+    Each indicator group is computed independently per timeframe and
+    added as new columns.  The engine is extensible — add new indicators
+    by registering them in ``_REGISTRY``.
+
+    Satisfies RF-6 acceptance criteria:
+    - Indicators calculated per timeframe.
+    - Each indicator is an independent feature.
+    - Multiple indicators per semantic group supported.
+    """
+
+    # Registry: (anonymous_label, callable(df) -> pd.Series)
+    # Extend this list to add new indicators without rewriting the pipeline (RNF-3).
+    _REGISTRY: list[tuple[str, callable]] = [
+        ("Ind1", lambda df: ta.trend.SMAIndicator(df["close"], window=14).sma_indicator()),
+        ("Ind2", lambda df: ta.trend.EMAIndicator(df["close"], window=14).ema_indicator()),
+        ("Ind3", lambda df: ta.momentum.RSIIndicator(df["close"], window=14).rsi()),
+        ("Ind4", lambda df: ta.trend.MACD(df["close"]).macd()),
+        ("Ind5", lambda df: ta.trend.MACD(df["close"]).macd_signal()),
+        ("Ind6", lambda df: ta.volatility.BollingerBands(df["close"]).bollinger_hband()),
+        ("Ind7", lambda df: ta.volatility.BollingerBands(df["close"]).bollinger_lband()),
+        ("Ind8", lambda df: ta.volatility.AverageTrueRange(df["high"], df["low"], df["close"]).average_true_range()),
+        ("Ind9", lambda df: ta.volume.OnBalanceVolumeIndicator(df["close"], df["volume"]).on_balance_volume()),
+        ("Ind10", lambda df: ta.momentum.StochasticOscillator(df["high"], df["low"], df["close"]).stoch()),
+    ]
+
+    # ── Public API ──────────────────────────────────
+
+    @classmethod
+    def compute(cls, df: pd.DataFrame, timeframe_suffix: str = "") -> pd.DataFrame:
+        """Compute all registered indicators and append them to *df*.
+
+        Args:
+            df: OHLCV DataFrame (must contain ``open, high, low, close, volume``).
+            timeframe_suffix: Optional suffix for column names (e.g. ``"_1h"``).
+
+        Returns:
+            DataFrame with indicator columns appended.
+        """
+        result = df.copy()
+        suffix = f"_{timeframe_suffix}" if timeframe_suffix else ""
+
+        for label, fn in cls._REGISTRY:
+            col_name = f"{label}{suffix}"
+            try:
+                result[col_name] = fn(result)
+            except Exception as exc:
+                logger.warning("Indicator {} failed: {}", col_name, exc)
+                result[col_name] = float("nan")
+
+        logger.debug(
+            "Computed {} indicators{}",
+            len(cls._REGISTRY),
+            f" (suffix={suffix})" if suffix else "",
+        )
+        return result
+
+    @classmethod
+    def compute_multi_timeframe(
+        cls, data: dict[str, pd.DataFrame]
+    ) -> dict[str, pd.DataFrame]:
+        """Compute indicators for each timeframe in the dict.
+
+        Args:
+            data: ``{timeframe: DataFrame}``.
+
+        Returns:
+            Same structure with indicator columns appended.
+        """
+        return {tf: cls.compute(df, timeframe_suffix=tf) for tf, df in data.items()}
+
+    @classmethod
+    def available_indicators(cls) -> list[str]:
+        """List the anonymous labels of all registered indicators."""
+        return [label for label, _ in cls._REGISTRY]
+</file>
+
+<file path="app/core/processing/normalizer.py">
+"""
+RF-9: Data normalization strategies.
+
+Applies the appropriate normalization method depending on feature type:
+- Bounded indicators (RSI, Stochastic) → Min-Max [0, 1]
+- Prices and returns                   → Z-Score
+- Volumes                              → Log scaling + standardization
+"""
+
+import numpy as np
+import pandas as pd
+from loguru import logger
+
+
+class Normalizer:
+    """Apply column-aware normalization to a feature DataFrame.
+
+    Stores fitted parameters (mean, std, min, max) so the same transform
+    can be applied identically on future data (RNF-2 reproducibility).
+    """
+
+    # Columns containing these substrings use specific strategies.
+    _BOUNDED_KEYWORDS = {"Ind3", "Ind10"}  # RSI, Stochastic → Min-Max
+    _VOLUME_KEYWORDS = {"volume", "Ind9"}  # Volume, OBV → Log-scale
+    # Everything else → Z-Score
+
+    def __init__(self):
+        self._params: dict[str, dict] = {}  # {col: {method, ...fitted_values}}
+
+    # ── Public API ──────────────────────────────────
+
+    def fit_transform(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Fit on *df* and return the normalized copy.
+
+        Args:
+            df: DataFrame of numeric features (excludes ``timestamp``).
+
+        Returns:
+            Normalized DataFrame with the same shape and columns.
+        """
+        result = df.copy()
+        numeric_cols = result.select_dtypes(include=[np.number]).columns
+
+        for col in numeric_cols:
+            method = self._detect_method(col)
+            result[col] = self._apply(result[col], col, method, fit=True)
+
+        logger.debug("Fit & transformed {} numeric columns", len(numeric_cols))
+        return result
+
+    def transform(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Transform *df* using previously fitted parameters.
+
+        Args:
+            df: DataFrame with the same columns used in ``fit_transform``.
+
+        Returns:
+            Normalized DataFrame.
+        """
+        result = df.copy()
+        numeric_cols = result.select_dtypes(include=[np.number]).columns
+
+        for col in numeric_cols:
+            if col not in self._params:
+                logger.warning("Column {} was not fitted — skipping", col)
+                continue
+            method = self._params[col]["method"]
+            result[col] = self._apply(result[col], col, method, fit=False)
+
+        return result
+
+    # ── Internal ────────────────────────────────────
+
+    def _detect_method(self, col: str) -> str:
+        """Heuristic to select normalization method based on column name."""
+        for kw in self._BOUNDED_KEYWORDS:
+            if kw in col:
+                return "minmax"
+        for kw in self._VOLUME_KEYWORDS:
+            if kw.lower() in col.lower():
+                return "log"
+        return "zscore"
+
+    def _apply(self, series: pd.Series, col: str, method: str, fit: bool) -> pd.Series:
+        if method == "minmax":
+            return self._minmax(series, col, fit)
+        elif method == "log":
+            return self._log_scale(series, col, fit)
+        else:
+            return self._zscore(series, col, fit)
+
+    def _minmax(self, s: pd.Series, col: str, fit: bool) -> pd.Series:
+        if fit:
+            mn, mx = s.min(), s.max()
+            self._params[col] = {"method": "minmax", "min": mn, "max": mx}
+        else:
+            mn = self._params[col]["min"]
+            mx = self._params[col]["max"]
+        rng = mx - mn
+        if rng == 0:
+            return pd.Series(0.0, index=s.index)
+        return (s - mn) / rng
+
+    def _zscore(self, s: pd.Series, col: str, fit: bool) -> pd.Series:
+        if fit:
+            mean, std = s.mean(), s.std()
+            self._params[col] = {"method": "zscore", "mean": mean, "std": std}
+        else:
+            mean = self._params[col]["mean"]
+            std = self._params[col]["std"]
+        if std == 0:
+            return pd.Series(0.0, index=s.index)
+        return (s - mean) / std
+
+    def _log_scale(self, s: pd.Series, col: str, fit: bool) -> pd.Series:
+        logged = np.log1p(s.clip(lower=0))
+        if fit:
+            mean, std = logged.mean(), logged.std()
+            self._params[col] = {"method": "log", "mean": mean, "std": std}
+        else:
+            mean = self._params[col]["mean"]
+            std = self._params[col]["std"]
+        if std == 0:
+            return pd.Series(0.0, index=s.index)
+        return (logged - mean) / std
+
+    @property
+    def fitted_params(self) -> dict[str, dict]:
+        """Return a copy of the fitted normalization parameters."""
+        return dict(self._params)
+</file>
+
+<file path="app/core/sync/__init__.py">
+"""Synchronization sub-package: multi-timeframe alignment."""
+</file>
+
+<file path="app/core/sync/multi_timeframe.py">
+"""
+RF-7: Multi-timeframe synchronization.
+
+Aligns 1h, 4h, and daily candle data into a single coherent row
+so that every row of the tensor represents the same market instant.
+"""
+
+import pandas as pd
+from loguru import logger
+
+
+class MultiTimeframeSync:
+    """Synchronize OHLCV DataFrames from different timeframes into one aligned table.
+
+    Alignment rules (RF-7):
+    - 4 candles of 1h  ≡ 1 candle of 4h.
+    - 24 candles of 1h ≡ 1 candle of 1d.
+    - Each row represents the *same* market instant.
+
+    Strategy: use the 1h timeframe as the master clock and forward-fill
+    the higher timeframes so each 1h row carries the most recent 4h/1d values.
+    """
+
+    # Mapping from standard config labels to canonical names
+    _TF_CANONICAL = {"1h": "1h", "4h": "4h", "1d": "1d", "1D": "1d"}
+
+    def __init__(self, base_timeframe: str = "1h"):
+        self._base = base_timeframe
+
+    # ── Public API ──────────────────────────────────
+
+    def synchronize(self, data: dict[str, pd.DataFrame]) -> pd.DataFrame:
+        """Merge multiple timeframes into a single aligned DataFrame.
+
+        Args:
+            data: ``{timeframe: DataFrame}`` — each DF must have a
+                  ``timestamp`` column and feature columns.
+
+        Returns:
+            A single DataFrame indexed by the base (1h) timestamps with
+            higher-timeframe columns forward-filled.
+        """
+        if self._base not in data:
+            raise ValueError(f"Base timeframe '{self._base}' not found in data keys: {list(data.keys())}")
+
+        base_df = data[self._base].copy()
+        base_df = base_df.set_index("timestamp").sort_index()
+
+        # Rename base columns with suffix
+        base_df = base_df.add_suffix(f"_{self._base}")
+
+        for tf, df in data.items():
+            canonical = self._TF_CANONICAL.get(tf, tf)
+            if canonical == self._base:
+                continue
+
+            higher = df.copy()
+            higher = higher.set_index("timestamp").sort_index()
+            higher = higher.add_suffix(f"_{canonical}")
+
+            # Reindex to the base clock — forward-fill so each 1h row
+            # carries the most recently known higher-TF value.
+            higher = higher.reindex(base_df.index, method="ffill")
+            base_df = base_df.join(higher, how="left")
+
+        # Forward-fill any remaining NaNs from the join
+        base_df = base_df.ffill()
+
+        logger.info(
+            "Synchronized {} timeframes → {} rows × {} cols",
+            len(data),
+            len(base_df),
+            len(base_df.columns),
+        )
+        return base_df
+
+    @staticmethod
+    def add_global_features(df: pd.DataFrame) -> pd.DataFrame:
+        """Append global features required by RF-11.
+
+        Adds:
+        - ``precio_actual``: latest close from the 1h column.
+        - ``tiempo_normalizado``: hour-of-day / 24, capturing intraday position.
+        """
+        result = df.copy()
+
+        # Current price = most recent 1h close at that row
+        close_1h_col = [c for c in result.columns if c.startswith("close") and "1h" in c]
+        if close_1h_col:
+            result["precio_actual"] = result[close_1h_col[0]]
+
+        # Normalized time (hour / 24)
+        result["tiempo_normalizado"] = result.index.hour / 24.0
+
+        return result
+</file>
+
+<file path="app/core/tensor/__init__.py">
+"""Tensor construction sub-package."""
+</file>
+
+<file path="app/core/tensor/builder.py">
+"""
+RF-8 / RF-10 / RF-11: Tensor construction with sliding windows.
+
+Builds a PyTorch tensor of shape ``(num_windows, window_size, num_features)``
+from a fully synchronized and normalized DataFrame.  Each window is a
+30 × N slice ready for neural network consumption.
+"""
+
+import numpy as np
+import pandas as pd
+import torch
+from loguru import logger
+
+from app.config import settings
+
+
+class TensorBuilder:
+    """Construct sliding-window tensors from a synchronized feature DataFrame.
+
+    Satisfies:
+    - RF-8:  Tensor shape ``30 × N`` with sliding windows.
+    - RF-10: No out-of-range values, no temporal misalignment.
+    - RF-11: Standard column layout per timeframe block + global vars.
+    """
+
+    def __init__(self, window_size: int | None = None):
+        self._window_size = window_size or settings.tensor_window_size
+
+    # ── Public API ──────────────────────────────────
+
+    def build(self, df: pd.DataFrame) -> torch.Tensor:
+        """Create a 3-D tensor from the synchronized DataFrame.
+
+        Args:
+            df: Fully synchronized, normalized DataFrame
+                (index = timestamps, columns = features).
+
+        Returns:
+            ``torch.Tensor`` of shape ``(num_windows, window_size, num_features)``.
+
+        Raises:
+            ValueError: If the DataFrame has fewer rows than the window size.
+        """
+        self._validate(df)
+
+        values = df.select_dtypes(include=[np.number]).values  # (T, N)
+        num_rows, num_features = values.shape
+        num_windows = num_rows - self._window_size + 1
+
+        # Sliding-window view — zero-copy where possible
+        windows = np.lib.stride_tricks.sliding_window_view(values, self._window_size, axis=0)
+        # windows shape: (num_windows, num_features, window_size) → transpose
+        windows = windows.transpose(0, 2, 1)  # → (num_windows, window_size, num_features)
+
+        tensor = torch.tensor(windows, dtype=torch.float32)
+
+        logger.success(
+            "Tensor built — shape {} (windows={}, steps={}, features={})",
+            list(tensor.shape),
+            num_windows,
+            self._window_size,
+            num_features,
+        )
+        return tensor
+
+    def build_single_window(self, df: pd.DataFrame) -> torch.Tensor:
+        """Build a single ``(1, window_size, N)`` tensor from the last rows.
+
+        Useful for real-time inference where only the latest window matters.
+        """
+        tail = df.tail(self._window_size)
+        self._validate(tail)
+        values = tail.select_dtypes(include=[np.number]).values
+        tensor = torch.tensor(values, dtype=torch.float32).unsqueeze(0)
+        return tensor
+
+    # ── Validation ──────────────────────────────────
+
+    def _validate(self, df: pd.DataFrame) -> None:
+        """RF-10 structural validation."""
+        if len(df) < self._window_size:
+            raise ValueError(
+                f"DataFrame has {len(df)} rows but window_size={self._window_size}"
+            )
+
+        numeric = df.select_dtypes(include=[np.number])
+
+        # Check for NaN / Inf
+        if numeric.isnull().any().any():
+            nan_cols = numeric.columns[numeric.isnull().any()].tolist()
+            logger.warning("NaN detected in columns: {} — filling with 0", nan_cols)
+            df[nan_cols] = df[nan_cols].fillna(0)
+
+        if np.isinf(numeric.values).any():
+            raise ValueError("Infinite values detected in feature DataFrame")
+
+    # ── Metadata ────────────────────────────────────
+
+    def describe(self, df: pd.DataFrame) -> dict:
+        """Return a summary of what the tensor would look like.
+
+        Useful for the observability endpoint (RNF-4).
+        """
+        numeric = df.select_dtypes(include=[np.number])
+        num_rows = len(df)
+        num_features = len(numeric.columns)
+        num_windows = max(0, num_rows - self._window_size + 1)
+        return {
+            "window_size": self._window_size,
+            "num_features": num_features,
+            "num_rows": num_rows,
+            "num_windows": num_windows,
+            "tensor_shape": [num_windows, self._window_size, num_features],
+            "feature_columns": numeric.columns.tolist(),
+        }
+</file>
+
+<file path="app/main.py">
+"""
+IA-APP — FastAPI Application Entry Point.
+
+Initializes the server, registers all routes, and configures
+middleware.  Covers RF-2 (Backend Initialization).
+"""
+
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from app import __version__
+from app.api.routes import data, replay, tensor
+from app.api.schemas import HealthResponse
+from app.utils.logger import setup_logging
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan — startup & shutdown hooks."""
+    setup_logging()
+    yield
+
+
+app = FastAPI(
+    title="IA-APP — AI Trading Data Pipeline",
+    description=(
+        "Fase 1: Infraestructura, Servidor y Pipeline de Datos. "
+        "Obtiene, sincroniza, normaliza y entrega tensores de mercado "
+        "multi-temporalidad (1h, 4h, 1d) listos para redes neuronales."
+    ),
+    version=__version__,
+    lifespan=lifespan,
+)
+
+# ── CORS ────────────────────────────────────────────
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ── Routes ──────────────────────────────────────────
+app.include_router(data.router)
+app.include_router(tensor.router)
+app.include_router(replay.router)
+
+
+# ── Health ──────────────────────────────────────────
+@app.get("/health", response_model=HealthResponse, tags=["System"])
+def health_check():
+    """Endpoint de salud del servidor."""
+    return HealthResponse(status="ok", version=__version__)
+</file>
+
+<file path="app/utils/__init__.py">
+"""Utility sub-package."""
+</file>
+
+<file path="app/utils/logger.py">
+"""
+Centralized logging configuration using Loguru.
+
+Provides structured, colored console output and optional file rotation.
+Satisfies RNF-4 (Observability).
+"""
+
+import sys
+
+from loguru import logger
+
+from app.config import settings
+
+
+def setup_logging() -> None:
+    """Configure Loguru for the application."""
+    # Remove default handler
+    logger.remove()
+
+    # Console handler — colorized, with context
+    log_level = "DEBUG" if settings.app_debug else "INFO"
+    logger.add(
+        sys.stderr,
+        level=log_level,
+        format=(
+            "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | "
+            "<level>{level: <8}</level> | "
+            "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> — "
+            "<level>{message}</level>"
+        ),
+        colorize=True,
+    )
+
+    # File handler — rotated daily, kept 7 days
+    logger.add(
+        "logs/ia_app_{time:YYYY-MM-DD}.log",
+        rotation="1 day",
+        retention="7 days",
+        level="DEBUG",
+        format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} — {message}",
+    )
+
+    logger.info("Logging initialized — level={}", log_level)
+</file>
+
+<file path="mi-resumen.md">
+This file is a merged representation of the entire codebase, combined into a single document by Repomix.
+
+# File Summary
+
+## Purpose
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+
+## File Format
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  a. A header with the file path (## File: path/to/file)
+  b. The full contents of the file in a code block
+
+## Usage Guidelines
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+
+## Notes
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+
+# Directory Structure
+```
+.env.example
+.gitignore
 app/__init__.py
 app/api/__init__.py
 app/api/routes/__init__.py
@@ -1765,3 +4230,2089 @@ pip install -r requirements.txt
 - **Horizonte:** Corto / Medio plazo.
 - **Temporalidades:** 1h, 4h, 1d (sincronizadas).
 ````
+</file>
+
+<file path="requirements.txt">
+# ── Server ──────────────────────────────────────────
+fastapi>=0.115.0
+uvicorn[standard]>=0.34.0
+pydantic>=2.11.0
+pydantic-settings>=2.9.0
+python-dotenv>=1.0.0
+
+# ── Data Ingestion ──────────────────────────────────
+ccxt>=4.5.0
+
+# ── Data Processing & Analysis ──────────────────────
+pandas>=2.2.0
+numpy>=2.1.0
+ta>=0.11.0
+
+# ── Time-Series & Replay ───────────────────────────
+darts>=0.32.0
+
+# ── Tensor / Deep Learning Backend ──────────────────
+torch>=2.6.0
+
+# ── Observability & Logging ─────────────────────────
+loguru>=0.7.0
+
+# ── Testing ─────────────────────────────────────────
+pytest>=8.0.0
+httpx>=0.28.0
+</file>
+
+<file path="run.py">
+"""
+Convenience script to launch the server.
+Usage: python run.py
+"""
+
+import uvicorn
+
+from app.config import settings
+
+if __name__ == "__main__":
+    uvicorn.run(
+        "app.main:app",
+        host=settings.app_host,
+        port=settings.app_port,
+        reload=settings.app_debug,
+    )
+</file>
+
+<file path="tests/__init__.py">
+"""Tests package."""
+</file>
+
+<file path="tests/test_api_health.py">
+"""
+Integration test for the FastAPI health endpoint.
+"""
+
+from fastapi.testclient import TestClient
+
+from app.main import app
+
+
+client = TestClient(app)
+
+
+class TestHealthEndpoint:
+    def test_health_returns_ok(self):
+        resp = client.get("/health")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "ok"
+        assert "version" in body
+</file>
+
+<file path="tests/test_normalizer.py">
+"""
+Unit tests for the Normalizer.
+Validates RF-9 normalization strategies.
+"""
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from app.core.processing.normalizer import Normalizer
+
+
+@pytest.fixture
+def feature_df() -> pd.DataFrame:
+    """Synthetic feature DataFrame."""
+    np.random.seed(42)
+    n = 100
+    return pd.DataFrame(
+        {
+            "close_1h": np.random.uniform(90, 110, n),    # → Z-Score
+            "Ind3_1h": np.random.uniform(0, 100, n),      # → Min-Max (RSI)
+            "volume_1h": np.random.uniform(1000, 5000, n), # → Log-scale
+            "Ind10_4h": np.random.uniform(0, 100, n),     # → Min-Max (Stoch)
+        }
+    )
+
+
+class TestNormalizer:
+    def test_fit_transform_shape(self, feature_df: pd.DataFrame):
+        norm = Normalizer()
+        result = norm.fit_transform(feature_df)
+        assert result.shape == feature_df.shape
+
+    def test_minmax_range(self, feature_df: pd.DataFrame):
+        norm = Normalizer()
+        result = norm.fit_transform(feature_df)
+        # RSI column → should be in [0, 1]
+        assert result["Ind3_1h"].min() >= -1e-9
+        assert result["Ind3_1h"].max() <= 1.0 + 1e-9
+
+    def test_zscore_mean_std(self, feature_df: pd.DataFrame):
+        norm = Normalizer()
+        result = norm.fit_transform(feature_df)
+        # Z-scored column → mean ≈ 0, std ≈ 1
+        assert abs(result["close_1h"].mean()) < 0.1
+        assert abs(result["close_1h"].std() - 1.0) < 0.1
+
+    def test_transform_uses_fitted_params(self, feature_df: pd.DataFrame):
+        norm = Normalizer()
+        norm.fit_transform(feature_df)
+        # Transform same data again → should give same result
+        result2 = norm.transform(feature_df)
+        assert result2.shape == feature_df.shape
+
+    def test_fitted_params_stored(self, feature_df: pd.DataFrame):
+        norm = Normalizer()
+        norm.fit_transform(feature_df)
+        params = norm.fitted_params
+        assert "close_1h" in params
+        assert params["close_1h"]["method"] == "zscore"
+        assert params["Ind3_1h"]["method"] == "minmax"
+</file>
+
+<file path="tests/test_tensor_builder.py">
+"""
+Unit tests for the Tensor Builder.
+Validates RF-8, RF-10 structural integrity.
+"""
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from app.core.tensor.builder import TensorBuilder
+
+
+@pytest.fixture
+def sample_df() -> pd.DataFrame:
+    """Create a synthetic OHLCV-like DataFrame with 50 rows."""
+    np.random.seed(42)
+    n = 50
+    return pd.DataFrame(
+        {
+            "open_1h": np.random.uniform(90, 110, n),
+            "close_1h": np.random.uniform(90, 110, n),
+            "high_1h": np.random.uniform(100, 120, n),
+            "low_1h": np.random.uniform(80, 100, n),
+            "volume_1h": np.random.uniform(1000, 5000, n),
+            "Ind1_1h": np.random.uniform(90, 110, n),
+            "Ind2_1h": np.random.uniform(90, 110, n),
+            "Ind3_1h": np.random.uniform(0, 100, n),
+            "precio_actual": np.random.uniform(90, 110, n),
+            "tiempo_normalizado": np.linspace(0, 1, n),
+        },
+        index=pd.date_range("2024-01-01", periods=n, freq="h"),
+    )
+
+
+class TestTensorBuilder:
+    def test_build_shape(self, sample_df: pd.DataFrame):
+        builder = TensorBuilder(window_size=30)
+        tensor = builder.build(sample_df)
+        # 50 rows, window 30 → 21 windows, 10 features
+        assert tensor.shape == (21, 30, 10)
+
+    def test_build_single_window(self, sample_df: pd.DataFrame):
+        builder = TensorBuilder(window_size=30)
+        tensor = builder.build_single_window(sample_df)
+        assert tensor.shape == (1, 30, 10)
+
+    def test_too_few_rows_raises(self):
+        small_df = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
+        builder = TensorBuilder(window_size=10)
+        with pytest.raises(ValueError, match="window_size"):
+            builder.build(small_df)
+
+    def test_describe_metadata(self, sample_df: pd.DataFrame):
+        builder = TensorBuilder(window_size=30)
+        meta = builder.describe(sample_df)
+        assert meta["window_size"] == 30
+        assert meta["num_features"] == 10
+        assert meta["tensor_shape"] == [21, 30, 10]
+</file>
+
+<file path="README.md">
+# IA-APP: Estrategia de Inversión Cuantitativa
+
+Este proyecto implementa una **Inteligencia Artificial** especializada en mercados financieros, diseñada para generar señales de compra y venta con objetivos de rentabilidad superiores al 10%. El sistema integra técnicas avanzadas de Deep Learning con metodologías cuantitativas de vanguardia.
+
+## 🚀 Características Principales
+
+- **Deep Reinforcement Learning (DRL):** El agente aprende directamente de los resultados financieros, optimizando la estrategia en entornos simulados antes de operar en real.
+- **Arquitectura Multimodal (xLSTM):** Integra información de precios, volumen, indicadores técnicos y sentimiento de mercado para tomar decisiones holísticas.
+- **Gestión de Riesgo Avanzada:** Implementa el **Triple Barrier Method** y **Differentiable Sharpe Ratio** para asegurar ratios riesgo/beneficio favorables (objetivo 1:4) y evitar el _overfitting_.
+- **Estructura Modular (RF-1 a RF-11):** El código sigue una arquitectura estricta que separa la recolección de datos, cálculo de indicadores, construcción de tensores y lógica de inferencia.
+
+## 🏗️ Arquitectura Técnica
+
+El sistema está organizado en los siguientes módulos principales:
+
+1.  **Data Fetcher:** Obtiene datos históricos de múltiples temporalidades (1h, 4h, 1d) desde fuentes fiables (Binance, CCXT).
+2.  **Indicator Engine:** Calcula indicadores técnicos (SMA, EMA, MACD, Bollinger Bands, etc.) utilizando la librería `ta`.
+3.  **Tensor Builder:** Estructura los datos en tensores 3D para el entrenamiento de redes neuronales, preservando el orden temporal.
+4.  **Model Architecture:** Implementación de redes basadas en **Transformers** y **LSTM** adaptadas a datos financieros (xLSTM, PatchTST).
+5.  **Risk Manager:** Define las condiciones de salida y profit (10%) y stop-loss (2%) para guiar el entrenamiento.
+
+## 🛠️ Instalación y Ejecución
+
+### Requisitos
+
+- Python 3.9+
+- CUDA (para entrenamiento GPU)
+
+### Instalación de Dependencias
+
+```bash
+git clone https://github.com/tuusuario/IA-APP.git
+cd IA-APP
+pip install -r requirements.txt
+```
+
+### Ejecución
+
+- **Entrenamiento:**
+  ```bash
+  python train.py --symbol BTC/USDT --epochs 50 --window-size 30
+  ```
+- **Inferencia (Modo Replay):**
+  ```bash
+  python main.py --mode replay --symbol BTC/USDT --speed 2.0
+  ```
+
+## 📊 Estrategia de Mercado
+
+- **Símbolo:** BTC/USDT
+- **Objetivo de Profit:** +10% por operación.
+- **Stop Loss:** -2%.
+- **Horizonte:** Corto / Medio plazo.
+- **Temporalidades:** 1h, 4h, 1d (sincronizadas).
+</file>
+
+</files>
+`````
+
+## File: run.py
+`````python
+"""
+Convenience script to launch the server.
+Usage: python run.py
+"""
+
+import uvicorn
+
+from app.config import settings
+
+if __name__ == "__main__":
+    uvicorn.run(
+        "app.main:app",
+        host=settings.app_host,
+        port=settings.app_port,
+        reload=settings.app_debug,
+    )
+`````
+
+## File: tests/test_api_health.py
+`````python
+"""
+Integration test for the FastAPI health endpoint.
+"""
+
+from fastapi.testclient import TestClient
+
+from app.main import app
+
+
+client = TestClient(app)
+
+
+class TestHealthEndpoint:
+    def test_health_returns_ok(self):
+        resp = client.get("/health")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "ok"
+        assert "version" in body
+`````
+
+## File: tests/test_normalizer.py
+`````python
+"""
+Unit tests for the Normalizer.
+Validates RF-9 normalization strategies.
+"""
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from app.core.processing.normalizer import Normalizer
+
+
+@pytest.fixture
+def feature_df() -> pd.DataFrame:
+    """Synthetic feature DataFrame."""
+    np.random.seed(42)
+    n = 100
+    return pd.DataFrame(
+        {
+            "close_1h": np.random.uniform(90, 110, n),    # → Z-Score
+            "Ind3_1h": np.random.uniform(0, 100, n),      # → Min-Max (RSI)
+            "volume_1h": np.random.uniform(1000, 5000, n), # → Log-scale
+            "Ind10_4h": np.random.uniform(0, 100, n),     # → Min-Max (Stoch)
+        }
+    )
+
+
+class TestNormalizer:
+    def test_fit_transform_shape(self, feature_df: pd.DataFrame):
+        norm = Normalizer()
+        result = norm.fit_transform(feature_df)
+        assert result.shape == feature_df.shape
+
+    def test_minmax_range(self, feature_df: pd.DataFrame):
+        norm = Normalizer()
+        result = norm.fit_transform(feature_df)
+        # RSI column → should be in [0, 1]
+        assert result["Ind3_1h"].min() >= -1e-9
+        assert result["Ind3_1h"].max() <= 1.0 + 1e-9
+
+    def test_zscore_mean_std(self, feature_df: pd.DataFrame):
+        norm = Normalizer()
+        result = norm.fit_transform(feature_df)
+        # Z-scored column → mean ≈ 0, std ≈ 1
+        assert abs(result["close_1h"].mean()) < 0.1
+        assert abs(result["close_1h"].std() - 1.0) < 0.1
+
+    def test_transform_uses_fitted_params(self, feature_df: pd.DataFrame):
+        norm = Normalizer()
+        norm.fit_transform(feature_df)
+        # Transform same data again → should give same result
+        result2 = norm.transform(feature_df)
+        assert result2.shape == feature_df.shape
+
+    def test_fitted_params_stored(self, feature_df: pd.DataFrame):
+        norm = Normalizer()
+        norm.fit_transform(feature_df)
+        params = norm.fitted_params
+        assert "close_1h" in params
+        assert params["close_1h"]["method"] == "zscore"
+        assert params["Ind3_1h"]["method"] == "minmax"
+`````
+
+## File: tests/test_tensor_builder.py
+`````python
+"""
+Unit tests for the Tensor Builder.
+Validates RF-8, RF-10 structural integrity.
+"""
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from app.core.tensor.builder import TensorBuilder
+
+
+@pytest.fixture
+def sample_df() -> pd.DataFrame:
+    """Create a synthetic OHLCV-like DataFrame with 50 rows."""
+    np.random.seed(42)
+    n = 50
+    return pd.DataFrame(
+        {
+            "open_1h": np.random.uniform(90, 110, n),
+            "close_1h": np.random.uniform(90, 110, n),
+            "high_1h": np.random.uniform(100, 120, n),
+            "low_1h": np.random.uniform(80, 100, n),
+            "volume_1h": np.random.uniform(1000, 5000, n),
+            "Ind1_1h": np.random.uniform(90, 110, n),
+            "Ind2_1h": np.random.uniform(90, 110, n),
+            "Ind3_1h": np.random.uniform(0, 100, n),
+            "precio_actual": np.random.uniform(90, 110, n),
+            "tiempo_normalizado": np.linspace(0, 1, n),
+        },
+        index=pd.date_range("2024-01-01", periods=n, freq="h"),
+    )
+
+
+class TestTensorBuilder:
+    def test_build_shape(self, sample_df: pd.DataFrame):
+        builder = TensorBuilder(window_size=30)
+        tensor = builder.build(sample_df)
+        # 50 rows, window 30 → 21 windows, 10 features
+        assert tensor.shape == (21, 30, 10)
+
+    def test_build_single_window(self, sample_df: pd.DataFrame):
+        builder = TensorBuilder(window_size=30)
+        tensor = builder.build_single_window(sample_df)
+        assert tensor.shape == (1, 30, 10)
+
+    def test_too_few_rows_raises(self):
+        small_df = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
+        builder = TensorBuilder(window_size=10)
+        with pytest.raises(ValueError, match="window_size"):
+            builder.build(small_df)
+
+    def test_describe_metadata(self, sample_df: pd.DataFrame):
+        builder = TensorBuilder(window_size=30)
+        meta = builder.describe(sample_df)
+        assert meta["window_size"] == 30
+        assert meta["num_features"] == 10
+        assert meta["tensor_shape"] == [21, 30, 10]
+`````
+
+## File: app/config.py
+`````python
+"""
+Centralized application configuration.
+Loads settings from .env file and environment variables.
+Covers RF-1 (environment isolation) requirements.
+"""
+
+__version__ = "0.1.0"
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    """Application-wide settings loaded from .env / environment."""
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+    )
+
+    # ── Server ──────────────────────────────────────
+    app_host: str = "0.0.0.0"
+    app_port: int = 8000
+    app_debug: bool = True
+
+    # ── Exchange ────────────────────────────────────
+    exchange_id: str = "binance"
+    exchange_rate_limit: bool = True
+
+    # ── Data ────────────────────────────────────────
+    default_symbol: str = "BTC/USDT"
+    default_timeframes: str = "1h,4h,1d"
+
+    # ── Tensor ──────────────────────────────────────
+    tensor_window_size: int = 100
+    historical_buffer_hours: int = 1440  # 60 días de 1h = ~2 meses
+
+    # ── Replay ──────────────────────────────────────
+    replay_speed_multiplier: float = 1.0
+    replay_refresh_seconds: float = 5.0
+
+    @property
+    def timeframes_list(self) -> list[str]:
+        """Return timeframes as a clean list."""
+        return [tf.strip() for tf in self.default_timeframes.split(",")]
+
+
+settings = Settings()
+`````
+
+## File: app/core/data_ingestion/historical.py
+`````python
+"""
+RF-3: Historical market data extraction via CCXT.
+
+Fetches OHLCV candle data from Binance (or any CCXT-supported exchange)
+with automatic pagination, chronological ordering, and reproducibility.
+
+Includes fallback exchanges and retry logic for geo-restricted regions.
+"""
+
+import time
+from datetime import datetime
+
+import ccxt
+import pandas as pd
+from loguru import logger
+
+from app.config import settings
+
+# Ordered fallback list — tried in sequence if the primary fails.
+_EXCHANGE_FALLBACKS = ["binance", "binanceus", "bybit", "okx", "kraken"]
+
+
+class HistoricalDataFetcher:
+    """Fetch historical OHLCV data from a cryptocurrency exchange.
+
+    Handles automatic pagination, rate-limiting, chronological ordering,
+    and exchange fallback to satisfy RF-3 acceptance criteria.
+    """
+
+    OHLCV_COLUMNS = ["timestamp", "open", "high", "low", "close", "volume"]
+
+    def __init__(self, exchange_id: str | None = None):
+        preferred = exchange_id or settings.exchange_id
+        self._exchange = self._init_exchange(preferred)
+        logger.info(
+            "HistoricalDataFetcher ready — using {}",
+            self._exchange.id,
+        )
+
+    # ── Exchange Initialization ─────────────────────
+
+    @staticmethod
+    def _init_exchange(preferred: str) -> ccxt.Exchange:
+        """Try to initialize and load markets for the preferred exchange.
+
+        Falls back through ``_EXCHANGE_FALLBACKS`` if the preferred one
+        is unreachable (geo-block, DNS failure, etc.).
+        """
+        candidates = [preferred] + [
+            ex for ex in _EXCHANGE_FALLBACKS if ex != preferred
+        ]
+
+        for eid in candidates:
+            try:
+                exchange_class = getattr(ccxt, eid, None)
+                if exchange_class is None:
+                    continue
+                exchange = exchange_class(
+                    {"enableRateLimit": settings.exchange_rate_limit}
+                )
+                exchange.load_markets()
+                logger.debug("Exchange {} connected successfully", eid)
+                return exchange
+            except Exception as exc:
+                logger.warning(
+                    "Exchange {} unavailable ({}), trying next…", eid, exc
+                )
+
+        raise RuntimeError(
+            f"No exchange reachable. Tried: {candidates}. "
+            "Check your internet connection or configure a VPN."
+        )
+
+    # ── Public API ──────────────────────────────────
+
+    def fetch(
+        self,
+        symbol: str | None = None,
+        timeframe: str = "1h",
+        since: str | datetime | None = None,
+        until: str | datetime | None = None,
+        limit_per_request: int = 1000,
+        max_retries: int = 3,
+    ) -> pd.DataFrame:
+        """Fetch paginated OHLCV data and return a clean DataFrame.
+
+        Args:
+            symbol: Trading pair, e.g. ``"BTC/USDT"``.
+            timeframe: Candle interval (``1h``, ``4h``, ``1d``).
+            since: Start datetime or ISO-8601 string.
+            until: End datetime or ISO-8601 string (defaults to now).
+            limit_per_request: Max candles per API call (exchange limit).
+            max_retries: Number of retry attempts per request on failure.
+
+        Returns:
+            ``pd.DataFrame`` with columns ``[timestamp, open, high, low, close, volume]``,
+            sorted chronologically.
+        """
+        symbol = symbol or settings.default_symbol
+        since_ms = self._to_ms(since) if since else None
+        until_ms = self._to_ms(until) if until else None
+
+        logger.info(
+            "Fetching {} {} | since={} until={}",
+            symbol,
+            timeframe,
+            since,
+            until,
+        )
+
+        all_candles: list[list] = []
+        while True:
+            batch = self._fetch_with_retry(
+                symbol, timeframe, since_ms, limit_per_request, max_retries
+            )
+            if not batch:
+                break
+
+            # Filter candles that exceed *until*
+            if until_ms:
+                batch = [c for c in batch if c[0] <= until_ms]
+                if not batch:
+                    break
+
+            all_candles.extend(batch)
+
+            # Advance cursor past the last candle
+            since_ms = batch[-1][0] + 1
+
+            if len(batch) < limit_per_request:
+                break
+
+        df = pd.DataFrame(all_candles, columns=self.OHLCV_COLUMNS)
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+        df = (
+            df.drop_duplicates(subset=["timestamp"])
+            .sort_values("timestamp")
+            .reset_index(drop=True)
+        )
+
+        df["progress_vela"] = self._calculate_progress_vela(df["timestamp"], timeframe)
+
+        logger.success("{} candles fetched for {} {}", len(df), symbol, timeframe)
+        return df
+
+    # ── Helpers ──────────────────────────────────────
+
+    def _fetch_with_retry(
+        self,
+        symbol: str,
+        timeframe: str,
+        since_ms: int | None,
+        limit: int,
+        max_retries: int,
+    ) -> list[list]:
+        """Fetch a single batch with exponential backoff retry."""
+        for attempt in range(1, max_retries + 1):
+            try:
+                return self._exchange.fetch_ohlcv(
+                    symbol, timeframe, since=since_ms, limit=limit
+                )
+            except (ccxt.NetworkError, ccxt.ExchangeNotAvailable) as exc:
+                wait = 2**attempt
+                logger.warning(
+                    "Retry {}/{} for {} {} — {} — waiting {}s",
+                    attempt,
+                    max_retries,
+                    symbol,
+                    timeframe,
+                    exc,
+                    wait,
+                )
+                time.sleep(wait)
+            except ccxt.ExchangeError as exc:
+                logger.error("Exchange error (non-retryable): {}", exc)
+                raise
+        logger.error("All {} retries exhausted", max_retries)
+        return []
+
+    def _to_ms(self, dt: str | datetime) -> int:
+        """Convert a datetime or ISO string to Unix milliseconds."""
+        if isinstance(dt, str):
+            return self._exchange.parse8601(dt)
+        return int(dt.timestamp() * 1000)
+
+    def _calculate_progress_vela(self, timestamps: pd.Series, timeframe: str) -> pd.Series:
+        """Calculate candle progress (0-1) for each timestamp.
+
+        Historical data from Binance always comes with closed candles,
+        so progress is always 1.0.
+
+        Args:
+            timestamps: Series of candle timestamps.
+            timeframe: Timeframe string (1h, 4h, 1d).
+
+        Returns:
+            Series with progress values (0-1).
+        """
+        if timeframe == "1h":
+            return pd.Series(1.0, index=timestamps.index)
+        elif timeframe == "4h":
+            return pd.Series(1.0, index=timestamps.index)
+        elif timeframe == "1d":
+            return pd.Series(1.0, index=timestamps.index)
+        return pd.Series(1.0, index=timestamps.index)
+
+    def fetch_multi_timeframe(
+        self,
+        symbol: str | None = None,
+        timeframes: list[str] | None = None,
+        since: str | datetime | None = None,
+        until: str | datetime | None = None,
+    ) -> dict[str, pd.DataFrame]:
+        """Fetch OHLCV for multiple timeframes.
+
+        Returns:
+            Dictionary ``{timeframe: DataFrame}``.
+        """
+        symbol = symbol or settings.default_symbol
+        timeframes = timeframes or settings.timeframes_list
+
+        results: dict[str, pd.DataFrame] = {}
+        for tf in timeframes:
+            results[tf] = self.fetch(
+                symbol=symbol, timeframe=tf, since=since, until=until
+            )
+        return results
+`````
+
+## File: app/core/data_ingestion/realtime.py
+`````python
+"""
+RF-4: Real-time market data extraction.
+
+Provides periodic polling of current OHLCV candles (including
+unclosed candles with provisional close = current price).
+Auto-refreshes every 15 minutes as specified in RF-4.
+"""
+
+import asyncio
+from datetime import datetime, timezone
+
+import ccxt
+import pandas as pd
+from loguru import logger
+
+from app.config import settings
+from app.core.data_ingestion.historical import HistoricalDataFetcher
+
+
+class RealTimeDataFetcher:
+    """Periodically fetch the latest OHLCV candles for all configured timeframes.
+
+    Satisfies RF-4 acceptance criteria:
+    - Auto-refresh every 15 minutes.
+    - Retrieves unclosed candles (1h, 4h, 1d) with current price as provisional close.
+    """
+
+    OHLCV_COLUMNS = ["timestamp", "open", "high", "low", "close", "volume"]
+    REFRESH_INTERVAL_SECONDS = 15 * 60  # 15 minutes
+
+    def __init__(self, exchange_id: str | None = None):
+        # Reuse the same fallback logic from HistoricalDataFetcher
+        self._exchange = HistoricalDataFetcher._init_exchange(
+            exchange_id or settings.exchange_id
+        )
+        self._latest: dict[str, pd.DataFrame] = {}
+        self._running = False
+        logger.info("RealTimeDataFetcher ready — using {}", self._exchange.id)
+
+    # ── Public API ──────────────────────────────────
+
+    def fetch_latest(
+        self,
+        symbol: str | None = None,
+        timeframe: str = "1h",
+        limit: int = 30,
+    ) -> pd.DataFrame:
+        """Fetch the most recent *limit* candles (includes unclosed current candle).
+
+        Args:
+            symbol: Trading pair.
+            timeframe: Candle interval.
+            limit: Number of candles to retrieve.
+
+        Returns:
+            DataFrame with the latest candles.
+        """
+        symbol = symbol or settings.default_symbol
+        raw = self._exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+        df = pd.DataFrame(raw, columns=self.OHLCV_COLUMNS)
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+        df["progress_vela"] = self._calculate_progress_vela(df["timestamp"], timeframe)
+        return df
+
+    def _calculate_progress_vela(self, timestamps: pd.Series, timeframe: str) -> pd.Series:
+        """Calculate candle progress (0-1) based on current time.
+
+        For real-time data, calculates how complete the current candle is:
+        - The last candle may be unclosed, so progress < 1.0
+        - Previous candles are closed (progress = 1.0)
+
+        Args:
+            timestamps: Series of candle timestamps.
+            timeframe: Timeframe string (1h, 4h, 1d).
+
+        Returns:
+            Series with progress values (0-1).
+        """
+        now = datetime.now(timezone.utc)
+        result = pd.Series(1.0, index=timestamps.index)
+
+        if timeframe == "1h":
+            minutes_in_hour = 60
+            current_minute = now.hour * 60 + now.minute
+            current_progress = (current_minute % 60) / minutes_in_hour
+            result.iloc[-1] = current_progress
+        elif timeframe == "4h":
+            hours_in_4h = 4
+            current_hour = now.hour
+            hour_in_period = current_hour % hours_in_4h
+            current_progress = (hour_in_period * 60 + now.minute) / (hours_in_4h * 60)
+            result.iloc[-1] = current_progress
+        elif timeframe == "1d":
+            current_hour = now.hour
+            current_progress = (current_hour * 60 + now.minute) / (24 * 60)
+            result.iloc[-1] = current_progress
+
+        return result
+
+    def fetch_latest_multi_timeframe(
+        self,
+        symbol: str | None = None,
+        timeframes: list[str] | None = None,
+        limit: int = 30,
+    ) -> dict[str, pd.DataFrame]:
+        """Fetch latest candles across all configured timeframes."""
+        symbol = symbol or settings.default_symbol
+        timeframes = timeframes or settings.timeframes_list
+
+        result: dict[str, pd.DataFrame] = {}
+        for tf in timeframes:
+            result[tf] = self.fetch_latest(symbol=symbol, timeframe=tf, limit=limit)
+        return result
+
+    # ── Background Polling Loop ─────────────────────
+
+    async def start_polling(
+        self,
+        symbol: str | None = None,
+        timeframes: list[str] | None = None,
+    ) -> None:
+        """Start an async loop that refreshes data every 15 min."""
+        symbol = symbol or settings.default_symbol
+        timeframes = timeframes or settings.timeframes_list
+        self._running = True
+
+        logger.info("Real-time polling started — every {}s", self.REFRESH_INTERVAL_SECONDS)
+        while self._running:
+            try:
+                self._latest = self.fetch_latest_multi_timeframe(
+                    symbol=symbol, timeframes=timeframes
+                )
+                logger.debug(
+                    "Refreshed real-time data at {}",
+                    datetime.now(timezone.utc).isoformat(),
+                )
+            except Exception as exc:
+                logger.error("Real-time fetch error: {}", exc)
+            await asyncio.sleep(self.REFRESH_INTERVAL_SECONDS)
+
+    def stop_polling(self) -> None:
+        """Stop the background polling loop."""
+        self._running = False
+        logger.info("Real-time polling stopped")
+
+    @property
+    def latest_data(self) -> dict[str, pd.DataFrame]:
+        """Return the most recently cached data."""
+        return self._latest
+`````
+
+## File: app/core/data_ingestion/replay_backtrader.py
+`````python
+"""
+RF-5: Backtrader Data Replay - Reconstruct higher timeframes from 1h data.
+
+Uses backtrader's replay feature to simulate how 4h and 1d candles develop
+from 1h input data, providing more realistic backtesting than pre-built candles.
+"""
+
+import asyncio
+from datetime import datetime
+from typing import AsyncGenerator
+
+import backtrader as bt
+import pandas as pd
+from loguru import logger
+
+
+class PandasDataFrameFeed(bt.feeds.PandasData):
+    """Custom data feed that accepts a DataFrame directly."""
+
+    params = (
+        ("datetime", None),
+        ("open", "open"),
+        ("high", "high"),
+        ("low", "low"),
+        ("close", "close"),
+        ("volume", "volume"),
+        ("openinterest", -1),
+    )
+
+
+class _EmptyStrategy(bt.Strategy):
+    """Estrategia vacía requerida para que backtrader procese los datos."""
+
+    def __init__(self):
+        pass
+
+    def next(self):
+        pass
+
+
+class BacktraderReplay:
+    """Replay 1h data and reconstruct 4h and 1d using backtrader's replay feature.
+
+    Instead of fetching pre-built 4h/1d candles, this class takes 1h candles and
+    uses backtrader to reconstruct how the higher timeframes would have formed
+    in real-time.
+
+    Flow per step:
+    1. Take 1h window of data
+    2. Reconstruct 4h via replay (4 candles = 1 x 4h)
+    3. Reconstruct 1d via replay (24 candles = 1 x 1d)
+    4. Yield {1h: df, "4h_recon": df, "1d_recon": df} with debug output
+    """
+
+    def __init__(
+        self,
+        data_1h: pd.DataFrame,
+        window_size: int | None = None,
+        speed_multiplier: float = 1.0,
+        refresh_seconds: float = 5.0,
+        historical_buffer: pd.DataFrame | None = None,
+    ):
+        """
+        Args:
+            data_1h: DataFrame with 1h OHLCV data (timestamp, open, high, low, close, volume)
+            window_size: Number of rows per sliding window (default: 100)
+            speed_multiplier: Speed factor for replay (1.0 = real-time speed)
+            refresh_seconds: Base interval between emissions in seconds
+            historical_buffer: Historical 1h data for indicator calculation (before replay starts)
+        """
+        self._window_size = window_size or 100
+        self._speed = speed_multiplier
+        self._refresh = refresh_seconds
+        self._active = False
+        self._historical_buffer = historical_buffer.copy() if historical_buffer is not None else None
+
+        self._data_1h = data_1h.copy()
+        self._data_1h = self._data_1h.set_index("timestamp").sort_index()
+        self._data_1h.index = pd.DatetimeIndex(self._data_1h.index)
+
+        self._max_steps = max(0, len(self._data_1h) - self._window_size)
+
+        logger.info(
+            "BacktraderReplay initialized — window={}, speed={}×, steps={}, total_1h_rows={}, buffer_rows={}",
+            self._window_size,
+            self._speed,
+            self._max_steps,
+            len(self._data_1h),
+            len(historical_buffer) if historical_buffer is not None else 0,
+        )
+
+    def _reconstruct_timeframe(self, df: pd.DataFrame, target_timeframe: str, compression: int) -> pd.DataFrame:
+        """Use backtrader to reconstruct a higher timeframe from 1h data."""
+        df_reset = df.copy()
+        
+        if "timestamp" in df_reset.columns:
+            df_reset["datetime"] = pd.to_datetime(df_reset["timestamp"])
+        elif "index" in df_reset.columns:
+            df_reset["datetime"] = pd.to_datetime(df_reset["index"])
+        else:
+            df_reset["datetime"] = df_reset.index
+            if hasattr(df_reset.index, 'to_pydatetime'):
+                df_reset["datetime"] = df_reset.index.to_pydatetime()
+            else:
+                df_reset["datetime"] = pd.to_datetime(df_reset["datetime"])
+
+        for col in ["open", "high", "low", "close", "volume"]:
+            if col in df_reset.columns:
+                df_reset[col] = df_reset[col].astype(float)
+
+        data_feed = PandasDataFrameFeed(
+            dataname=df_reset,
+            datetime=0,
+            open="open",
+            high="high",
+            low="low",
+            close="close",
+            volume="volume",
+            openinterest=-1,
+        )
+
+        cerebro = bt.Cerebro()
+        cerebro.adddata(data_feed)
+
+        if target_timeframe == "4h":
+            cerebro.replaydata(
+                data_feed,
+                timeframe=bt.TimeFrame.Minutes,
+                compression=240,
+            )
+        elif target_timeframe == "1d":
+            cerebro.replaydata(
+                data_feed,
+                timeframe=bt.TimeFrame.Days,
+                compression=24,
+            )
+
+        cerebro.addstrategy(_EmptyStrategy)
+
+        cerebro.run()
+        
+        result_rows = []
+        
+        # En backtrader con replaydata, solo se puede acceder a la barra actual (índice 0)
+        # ya que el replay va construyendo la barra en tiempo real
+        if len(cerebro.datas) > 1:
+            replay_data = cerebro.datas[1]
+            data_len = len(replay_data)
+            logger.debug(f"Reconstructed {target_timeframe}: {data_len} bars")
+            
+            # Solo accedemos a la barra 0 (la barra actual en construcción)
+            if data_len > 0:
+                try:
+                    result_rows.append(
+                        {
+                            "timestamp": replay_data.datetime[0],
+                            "open": float(replay_data.open[0]),
+                            "high": float(replay_data.high[0]),
+                            "low": float(replay_data.low[0]),
+                            "close": float(replay_data.close[0]),
+                            "volume": float(replay_data.volume[0] if replay_data.volume[0] else 0),
+                        }
+                    )
+                except Exception as e:
+                    logger.warning("Error accessing replay data: {}", e)
+
+        if result_rows:
+            result_df = pd.DataFrame(result_rows)
+            # Convertir a datetime64[ms, UTC] para consistencia con datos de Binance
+            result_df["timestamp"] = pd.to_datetime(result_df["timestamp"]).dt.tz_localize("UTC")
+            return result_df
+
+        return pd.DataFrame(
+            columns=["timestamp", "open", "high", "low", "close", "volume"]
+        )
+
+    async def stream(self) -> AsyncGenerator[dict[str, pd.DataFrame], None]:
+        """Async generator that yields one window per step with reconstructed timeframes.
+
+        Each step yields:
+        - combined_1h: historical buffer + current replay window (for indicator calculation)
+        - combined_4h: historical 4h buffer + reconstructed 4h
+        - combined_1d: historical 1d buffer + reconstructed 1d
+        - replay_window_1h: current 30h replay data only (progress_vela=1.0)
+        - replay_4h: reconstructed 4h with progress
+        - replay_1d: reconstructed 1d with progress
+        - step: current step number
+        """
+        self._active = True
+        delay = self._refresh / self._speed
+
+        hist_4h = self._build_historical_timeframe(self._historical_buffer, "4h") if self._historical_buffer is not None else pd.DataFrame()
+        hist_1d = self._build_historical_timeframe(self._historical_buffer, "1d") if self._historical_buffer is not None else pd.DataFrame()
+
+        for step in range(self._max_steps):
+            if not self._active:
+                logger.info("Replay stopped at step {}/{}", step, self._max_steps)
+                return
+
+            window_1h = self._data_1h.iloc[step : step + self._window_size].copy()
+            window_1h = window_1h.reset_index()
+            window_1h["progress_vela"] = 1.0
+
+            hist_portion = pd.DataFrame()
+            if self._historical_buffer is not None:
+                needed = self._window_size - (step + self._window_size)
+                if needed > 0 and step >= self._window_size:
+                    needed = self._window_size
+                hist_portion = self._historical_buffer.tail(needed) if needed > 0 else pd.DataFrame()
+
+            combined_1h = pd.concat([hist_portion, window_1h], ignore_index=True) if not hist_portion.empty else window_1h
+
+            logger.debug("Replay step {}/{}", step + 1, self._max_steps)
+
+            logger.info(f"[Step {step + 1}/{self._max_steps}]")
+            logger.info("  1h:        {} | O:{:.2f} H:{:.2f} L:{:.2f} C:{:.2f} V:{:.0f}".format(
+                window_1h["timestamp"].iloc[0].strftime("%Y-%m-%d %H:%M"),
+                window_1h["open"].iloc[0],
+                window_1h["high"].iloc[0],
+                window_1h["low"].iloc[0],
+                window_1h["close"].iloc[0],
+                window_1h["volume"].iloc[0],
+            ))
+
+            df_4h = self._reconstruct_timeframe(window_1h, "4h", 240)
+            if not df_4h.empty:
+                progress_4h = ((step % 4) + 1) / 4.0
+                df_4h["progress_vela"] = progress_4h
+
+                hist_4h_portion = hist_4h.tail(max(0, 50 - step - 1)) if step < 50 else pd.DataFrame()
+                combined_4h = pd.concat([hist_4h_portion, df_4h], ignore_index=True) if not hist_4h_portion.empty else df_4h
+            else:
+                progress_4h = 0.0
+                combined_4h = hist_4h.copy()
+
+            logger.info("  4h_recon:  {} | O:{:.2f} H:{:.2f} L:{:.2f} C:{:.2f} V:{:.0f} | P:{:.2f}".format(
+                df_4h["timestamp"].iloc[0].strftime("%Y-%m-%d") if not df_4h.empty else "N/A",
+                df_4h["open"].iloc[0] if not df_4h.empty else 0,
+                df_4h["high"].iloc[0] if not df_4h.empty else 0,
+                df_4h["low"].iloc[0] if not df_4h.empty else 0,
+                df_4h["close"].iloc[0] if not df_4h.empty else 0,
+                df_4h["volume"].iloc[0] if not df_4h.empty else 0,
+                progress_4h,
+            ))
+
+            df_1d = self._reconstruct_timeframe(window_1h, "1d", 24)
+            if not df_1d.empty:
+                progress_1d = ((step % 24) + 1) / 24.0
+                df_1d["progress_vela"] = progress_1d
+
+                hist_1d_portion = hist_1d.tail(max(0, 30 - step - 1)) if step < 30 else pd.DataFrame()
+                combined_1d = pd.concat([hist_1d_portion, df_1d], ignore_index=True) if not hist_1d_portion.empty else df_1d
+            else:
+                progress_1d = 0.0
+                combined_1d = hist_1d.copy()
+
+            logger.info("  1d_recon:  {} | O:{:.2f} H:{:.2f} L:{:.2f} C:{:.2f} V:{:.0f} | P:{:.2f}".format(
+                df_1d["timestamp"].iloc[0].strftime("%Y-%m-%d") if not df_1d.empty else "N/A",
+                df_1d["open"].iloc[0] if not df_1d.empty else 0,
+                df_1d["high"].iloc[0] if not df_1d.empty else 0,
+                df_1d["low"].iloc[0] if not df_1d.empty else 0,
+                df_1d["close"].iloc[0] if not df_1d.empty else 0,
+                df_1d["volume"].iloc[0] if not df_1d.empty else 0,
+                progress_1d,
+            ))
+
+            yield {
+                "combined_1h": combined_1h,
+                "combined_4h": combined_4h,
+                "combined_1d": combined_1d,
+                "replay_1h": window_1h,
+                "replay_4h": df_4h,
+                "replay_1d": df_1d,
+                "step": step,
+            }
+
+            await asyncio.sleep(delay)
+
+        self._active = False
+        logger.success("Replay completed — {} steps emitted", self._max_steps)
+
+    def _build_historical_timeframe(self, data_1h: pd.DataFrame, target_timeframe: str) -> pd.DataFrame:
+        """Build historical higher timeframe data from 1h buffer using backtrader."""
+        df = data_1h.copy()
+        df = df.reset_index()
+
+        if df.empty or "timestamp" not in df.columns:
+            return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume", "progress_vela"])
+
+        compression = 240 if target_timeframe == "4h" else 24
+
+        result_rows = []
+        for i in range(compression, len(df) + 1, compression):
+            chunk = df.iloc[i - compression:i]
+            if chunk.empty:
+                continue
+            result_rows.append({
+                "timestamp": chunk["timestamp"].iloc[-1],
+                "open": chunk["open"].iloc[0],
+                "high": chunk["high"].max(),
+                "low": chunk["low"].min(),
+                "close": chunk["close"].iloc[-1],
+                "volume": chunk["volume"].sum(),
+                "progress_vela": 1.0,
+            })
+
+        return pd.DataFrame(result_rows)
+
+    def stop(self) -> None:
+        """Stop the replay mid-stream."""
+        self._active = False
+
+    @property
+    def is_active(self) -> bool:
+        """Check if replay is currently running."""
+        return self._active
+
+    @property
+    def total_steps(self) -> int:
+        """Total number of replay steps available."""
+        return self._max_steps
+`````
+
+## File: app/core/processing/indicators.py
+`````python
+"""
+RF-6: Technical indicator calculation using the ``ta`` library.
+
+Organizado por grupos:
+- VELOCIDAD: MON, ROC, RSI (6,14,24 + EMAs), Stochastic, Williams %R, CCI
+- TENDENCIA: MACD, ADX, DI+/DI-, EMA 22/50/100, Ichimoku
+- AMPLITUD: Bollinger Bands, Keltner Channels
+- LIQUIDEZ: CMF, OBV, Elder Ray, EOM, VWAP
+"""
+
+import pandas as pd
+import ta
+from loguru import logger
+
+
+class IndicatorEngine:
+    """Calculate technical indicators on OHLCV DataFrames organized by groups.
+
+    Cada indicador se calcula por timeframe y se añade como columna independiente.
+    """
+
+    # ===================== VELOCIDAD =====================
+    # ~12 indicadores por timeframe
+    _VELOCIDAD: list[tuple[str, callable]] = [
+        ("MON", lambda df: ta.momentum.ROCIndicator(df["close"], window=12).roc()),
+        ("ROC", lambda df: ta.momentum.ROCIndicator(df["close"], window=14).roc()),
+        ("RSI_6", lambda df: ta.momentum.RSIIndicator(df["close"], window=6).rsi()),
+        ("RSI_14", lambda df: ta.momentum.RSIIndicator(df["close"], window=14).rsi()),
+        ("RSI_24", lambda df: ta.momentum.RSIIndicator(df["close"], window=24).rsi()),
+        ("RSI_EMA_6", lambda df: ta.momentum.RSIIndicator(df["close"], window=6).rsi().ewm(span=6).mean()),
+        ("RSI_EMA_14", lambda df: ta.momentum.RSIIndicator(df["close"], window=14).rsi().ewm(span=14).mean()),
+        ("RSI_EMA_24", lambda df: ta.momentum.RSIIndicator(df["close"], window=24).rsi().ewm(span=24).mean()),
+        ("STOCH_K", lambda df: ta.momentum.StochasticOscillator(df["high"], df["low"], df["close"]).stoch()),
+        ("STOCH_D", lambda df: ta.momentum.StochasticOscillator(df["high"], df["low"], df["close"]).stoch_signal()),
+        ("WILLIAMS_R", lambda df: ta.momentum.WilliamsRIndicator(df["high"], df["low"], df["close"]).williams_r()),
+        ("CCI", lambda df: ta.trend.CCIIndicator(df["high"], df["low"], df["close"]).cci()),
+    ]
+
+    # ===================== TENDENCIA =====================
+    # ~17 indicadores por timeframe
+    _TENDENCIA: list[tuple[str, callable]] = [
+        ("MACD_LINE", lambda df: ta.trend.MACD(df["close"]).macd()),
+        ("MACD_SIGNAL", lambda df: ta.trend.MACD(df["close"]).macd_signal()),
+        ("MACD_HIST", lambda df: ta.trend.MACD(df["close"]).macd_diff()),
+        ("ADX", lambda df: ta.trend.ADXIndicator(df["high"], df["low"], df["close"]).adx()),
+        ("DI_PLUS", lambda df: ta.trend.ADXIndicator(df["high"], df["low"], df["close"]).adx_pos()),
+        ("DI_MINUS", lambda df: ta.trend.ADXIndicator(df["high"], df["low"], df["close"]).adx_neg()),
+        ("EMA_22", lambda df: ta.trend.EMAIndicator(df["close"], window=22).ema_indicator()),
+        ("EMA_50", lambda df: ta.trend.EMAIndicator(df["close"], window=50).ema_indicator()),
+        ("EMA_100", lambda df: ta.trend.EMAIndicator(df["close"], window=100).ema_indicator()),
+        ("ICHIMOKU_TENKAN", lambda df: IndicatorEngine._ichimoku_tenkan(df)),
+        ("ICHIMOKU_KIJUN", lambda df: IndicatorEngine._ichimoku_kijun(df)),
+        ("ICHIMOKU_SA", lambda df: IndicatorEngine._ichimoku_senkou_a(df)),
+        ("ICHIMOKU_SB", lambda df: IndicatorEngine._ichimoku_senkou_b(df)),
+        ("ICHIMOKU_CHIKOU", lambda df: IndicatorEngine._ichimoku_chikou(df)),
+    ]
+
+    # ===================== AMPLITUD =====================
+    # ~7 indicadores por timeframe
+    _AMPLITUD: list[tuple[str, callable]] = [
+        ("BB_UPPER", lambda df: ta.volatility.BollingerBands(df["close"]).bollinger_hband()),
+        ("BB_MIDDLE", lambda df: ta.volatility.BollingerBands(df["close"]).bollinger_mavg()),
+        ("BB_LOWER", lambda df: ta.volatility.BollingerBands(df["close"]).bollinger_lband()),
+        ("BB_WIDTH", lambda df: (ta.volatility.BollingerBands(df["close"]).bollinger_hband() - ta.volatility.BollingerBands(df["close"]).bollinger_lband()) / ta.volatility.BollingerBands(df["close"]).bollinger_mavg()),
+        ("KELTNER_UPPER", lambda df: IndicatorEngine._keltner_upper(df)),
+        ("KELTNER_MIDDLE", lambda df: ta.trend.EMAIndicator(df["close"], window=20).ema_indicator()),
+        ("KELTNER_LOWER", lambda df: IndicatorEngine._keltner_lower(df)),
+    ]
+
+    # ===================== LIQUIDEZ =====================
+    # ~6 indicadores por timeframe
+    _LIQUIDEZ: list[tuple[str, callable]] = [
+        ("CMF", lambda df: ta.volume.ChaikinMoneyFlowIndicator(df["high"], df["low"], df["close"], df["volume"], window=20).chaikin_money_flow()),
+        ("OBV", lambda df: ta.volume.OnBalanceVolumeIndicator(df["close"], df["volume"]).on_balance_volume()),
+        ("ELDER_BULL", lambda df: df["close"] - ta.trend.EMAIndicator(df["close"], window=13).ema_indicator()),
+        ("ELDER_BEAR", lambda df: df["close"] - ta.trend.EMAIndicator(df["close"], window=13).ema_indicator() - (df["high"].rolling(13).max() - ta.trend.EMAIndicator(df["close"], window=13).ema_indicator())),
+        ("EOM", lambda df: ta.volume.EaseOfMovementIndicator(df["high"], df["low"], df["volume"]).ease_of_movement()),
+        ("VWAP", lambda df: (df["close"] * df["volume"]).cumsum() / df["volume"].cumsum()),
+    ]
+
+    # Mapping de grupos
+    _GROUPS = {
+        "velocidad": _VELOCIDAD,
+        "tendencia": _TENDENCIA,
+        "amplitud": _AMPLITUD,
+        "liquidez": _LIQUIDEZ,
+    }
+
+    # ── Helpers para indicadores complejos ─────────────────────
+
+    @staticmethod
+    def _ichimoku_tenkan(df: pd.DataFrame) -> pd.Series:
+        """Tenkan-sen (Conversion Line) = (Max high + Min low) / 2 for 9 periods"""
+        high_9 = df["high"].rolling(window=9).max()
+        low_9 = df["low"].rolling(window=9).min()
+        return (high_9 + low_9) / 2
+
+    @staticmethod
+    def _ichimoku_kijun(df: pd.DataFrame) -> pd.Series:
+        """Kijun-sen (Base Line) = (Max high + Min low) / 2 for 26 periods"""
+        high_26 = df["high"].rolling(window=26).max()
+        low_26 = df["low"].rolling(window=26).min()
+        return (high_26 + low_26) / 2
+
+    @staticmethod
+    def _ichimoku_senkou_a(df: pd.DataFrame) -> pd.Series:
+        """Senkou A (Leading Span A) = (Tenkan + Kijun) / 2"""
+        tenkan = (df["high"].rolling(window=9).max() + df["low"].rolling(window=9).min()) / 2
+        kijun = (df["high"].rolling(window=26).max() + df["low"].rolling(window=26).min()) / 2
+        return (tenkan + kijun) / 2
+
+    @staticmethod
+    def _ichimoku_senkou_b(df: pd.DataFrame) -> pd.Series:
+        """Senkou B (Leading Span B) = (Max high + Min low) / 2 for 52 periods"""
+        high_52 = df["high"].rolling(window=52).max()
+        low_52 = df["low"].rolling(window=52).min()
+        return (high_52 + low_52) / 2
+
+    @staticmethod
+    def _ichimoku_chikou(df: pd.DataFrame) -> pd.Series:
+        """Chikou Span (Lagging Span) = Close shifted -26 periods"""
+        return df["close"].shift(-26)
+
+    @staticmethod
+    def _keltner_upper(df: pd.DataFrame) -> pd.Series:
+        """Keltner Channel Upper = EMA + (ATR * 2)"""
+        ema = ta.trend.EMAIndicator(df["close"], window=20).ema_indicator()
+        atr = ta.volatility.AverageTrueRange(df["high"], df["low"], df["close"], window=20).average_true_range()
+        return ema + (atr * 2)
+
+    @staticmethod
+    def _keltner_lower(df: pd.DataFrame) -> pd.Series:
+        """Keltner Channel Lower = EMA - (ATR * 2)"""
+        ema = ta.trend.EMAIndicator(df["close"], window=20).ema_indicator()
+        atr = ta.volatility.AverageTrueRange(df["high"], df["low"], df["close"], window=20).average_true_range()
+        return ema - (atr * 2)
+
+    # ── Public API ───────────────────────────────────────────
+
+    @classmethod
+    def compute(cls, df: pd.DataFrame, timeframe_suffix: str = "") -> pd.DataFrame:
+        """Compute all indicators (all groups) and append them to df."""
+        result = df.copy()
+        suffix = f"_{timeframe_suffix}" if timeframe_suffix else ""
+
+        # Skip heavy indicators if not enough data
+        min_rows = 60
+        has_enough_data = len(df) >= min_rows
+        
+        if not has_enough_data:
+            logger.warning(f"DataFrame has only {len(df)} rows, need {min_rows} for full indicators")
+
+        total_indicators = 0
+
+        for group_name, indicators in cls._GROUPS.items():
+            for label, fn in indicators:
+                col_name = f"{label}{suffix}"
+                try:
+                    # Skip indicators requiring more data than available
+                    if label in ("EMA_50", "EMA_100", "ICHIMOKU_SB", "ADX", "DI_PLUS", "DI_MINUS", 
+                               "KELTNER_UPPER", "KELTNER_MIDDLE", "KELTNER_LOWER"):
+                        required_rows = {"EMA_50": 50, "EMA_100": 100, "ICHIMOKU_SB": 52,
+                                        "ADX": 14, "DI_PLUS": 14, "DI_MINUS": 14,
+                                        "KELTNER_UPPER": 20, "KELTNER_MIDDLE": 20, "KELTNER_LOWER": 20}
+                        if len(df) < required_rows.get(label, 60):
+                            result[col_name] = float("nan")
+                            total_indicators += 1
+                            continue
+                    
+                    result[col_name] = fn(result)
+                except Exception as exc:
+                    logger.warning("Indicator {} failed: {}", col_name, exc)
+                    result[col_name] = float("nan")
+                total_indicators += 1
+
+        logger.debug(
+            "Computed {} indicators for {} (suffix={})",
+            total_indicators,
+            group_name,
+            suffix,
+        )
+        return result
+
+    @classmethod
+    def compute_by_group(cls, df: pd.DataFrame, group: str, timeframe_suffix: str = "") -> pd.DataFrame:
+        """Compute indicators for a specific group only."""
+        result = df.copy()
+        suffix = f"_{timeframe_suffix}" if timeframe_suffix else ""
+
+        if group not in cls._GROUPS:
+            raise ValueError(f"Grupo desconocido: {group}. Available: {list(cls._GROUPS.keys())}")
+
+        for label, fn in cls._GROUPS[group]:
+            col_name = f"{label}{suffix}"
+            try:
+                result[col_name] = fn(result)
+            except Exception as exc:
+                logger.warning("Indicator {} failed: {}", col_name, exc)
+                result[col_name] = float("nan")
+
+        return result
+
+    @classmethod
+    def compute_multi_timeframe(cls, data: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
+        """Compute indicators for each timeframe in the dict."""
+        return {tf: cls.compute(df, timeframe_suffix=tf) for tf, df in data.items()}
+
+    @classmethod
+    def get_group_columns(cls, group: str, timeframe_suffix: str = "") -> list[str]:
+        """Get list of column names for a specific group."""
+        suffix = f"_{timeframe_suffix}" if timeframe_suffix else ""
+        return [f"{label}{suffix}" for label, _ in cls._GROUPS.get(group, [])]
+
+    @classmethod
+    def get_all_groups_columns(cls, timeframe_suffix: str = "") -> dict[str, list[str]]:
+        """Get columns for all groups."""
+        suffix = f"_{timeframe_suffix}" if timeframe_suffix else ""
+        return {
+            group: [f"{label}{suffix}" for label, _ in indicators]
+            for group, indicators in cls._GROUPS.items()
+        }
+
+    @classmethod
+    def available_indicators(cls) -> dict[str, int]:
+        """List available indicators by group."""
+        return {group: len(indicators) for group, indicators in cls._GROUPS.items()}
+`````
+
+## File: app/core/tensor/builder.py
+`````python
+"""
+RF-8 / RF-10 / RF-11: Tensor construction with sliding windows.
+
+Builds a PyTorch tensor of shape ``(num_windows, window_size, num_features)``
+from a fully synchronized and normalized DataFrame.  Each window is a
+30 × N slice ready for neural network consumption.
+"""
+
+import numpy as np
+import pandas as pd
+import torch
+from loguru import logger
+
+from app.config import settings
+from app.core.processing.indicators import IndicatorEngine
+
+
+class TensorBuilder:
+    """Construct sliding-window tensors from a synchronized feature DataFrame.
+
+    Satisfies:
+    - RF-8:  Tensor shape ``30 × N`` with sliding windows.
+    - RF-10: No out-of-range values, no temporal misalignment.
+    - RF-11: Standard column layout per timeframe block + global vars.
+    """
+
+    def __init__(self, window_size: int | None = None):
+        self._window_size = window_size or settings.tensor_window_size
+
+    # ── Public API ──────────────────────────────────
+
+    def build(self, df: pd.DataFrame) -> torch.Tensor:
+        """Create a 3-D tensor from the synchronized DataFrame.
+
+        Args:
+            df: Fully synchronized, normalized DataFrame
+                (index = timestamps, columns = features).
+
+        Returns:
+            ``torch.Tensor`` of shape ``(num_windows, window_size, num_features)``.
+
+        Raises:
+            ValueError: If the DataFrame has fewer rows than the window size.
+        """
+        self._validate(df)
+
+        values = df.select_dtypes(include=[np.number]).values  # (T, N)
+        num_rows, num_features = values.shape
+        num_windows = num_rows - self._window_size + 1
+
+        # Sliding-window view — zero-copy where possible
+        windows = np.lib.stride_tricks.sliding_window_view(values, self._window_size, axis=0)
+        # windows shape: (num_windows, num_features, window_size) → transpose
+        windows = windows.transpose(0, 2, 1)  # → (num_windows, window_size, num_features)
+
+        tensor = torch.tensor(windows, dtype=torch.float32)
+
+        logger.success(
+            "Tensor built — shape {} (windows={}, steps={}, features={})",
+            list(tensor.shape),
+            num_windows,
+            self._window_size,
+            num_features,
+        )
+        return tensor
+
+    def build_single_window(self, df: pd.DataFrame) -> torch.Tensor:
+        """Build a single ``(1, window_size, N)`` tensor from the last rows.
+
+        Useful for real-time inference where only the latest window matters.
+        """
+        tail = df.tail(self._window_size)
+        self._validate(tail)
+        values = tail.select_dtypes(include=[np.number]).values
+        tensor = torch.tensor(values, dtype=torch.float32).unsqueeze(0)
+        return tensor
+
+    def build_grouped(self, df: pd.DataFrame) -> dict[str, torch.Tensor]:
+        """Build separate tensors for each indicator group.
+
+        Each tensor contains:
+        - Indicator columns for that specific group (from all timeframes)
+        - progress_vela columns (1h, 4h, 1d) - shared across all groups
+
+        Args:
+            df: Fully synchronized, normalized DataFrame.
+
+        Returns:
+            Dict with keys: "velocidad", "tendencia", "amplitud", "liquidez"
+            Each value is a torch.Tensor of shape (1, window_size, num_features).
+        """
+        self._validate(df)
+
+        # Columns de progreso de vela (comunes a todos los grupos)
+        progress_cols = [
+            "progress_vela_1h",
+            "progress_vela_4h", 
+            "progress_vela_1d",
+        ]
+        available_progress = [c for c in progress_cols if c in df.columns]
+
+        # Obtener indicadores POR GRUPO
+        groups_dict = {}
+        for group_name, group_indicators in IndicatorEngine._GROUPS.items():
+            indicator_base_names = [label for label, _ in group_indicators]
+            
+            group_indicators_available = []
+            for base_name in indicator_base_names:
+                for tf_suffix in ["_1h", "_4h", "_1d"]:
+                    full_name = f"{base_name}{tf_suffix}"
+                    if full_name in df.columns:
+                        group_indicators_available.append(full_name)
+            
+            groups_dict[group_name] = group_indicators_available
+
+        # Construir tensor para cada grupo
+        result = {}
+        
+        for group_name, indicator_cols in groups_dict.items():
+            group_cols = available_progress + indicator_cols
+
+            if not group_cols:
+                logger.warning(f"No columns found for group {group_name}")
+                result[group_name] = None
+                continue
+
+            valid_cols = [c for c in group_cols if c in df.columns]
+            group_df = df[valid_cols].select_dtypes(include=[np.number])
+            values = group_df.values
+
+            if len(values) < self._window_size:
+                logger.warning(f"Group {group_name}: not enough rows ({len(values)} < {self._window_size})")
+                result[group_name] = None
+                continue
+
+            # Sliding window view
+            windows = np.lib.stride_tricks.sliding_window_view(values, self._window_size, axis=0)
+            windows = windows.transpose(0, 2, 1)
+
+            tensor = torch.tensor(windows, dtype=torch.float32)
+
+            logger.info(
+                "Grupo {}: shape {} (indicators={}, progress={})",
+                group_name,
+                list(tensor.shape),
+                len(indicator_cols),
+                len(available_progress),
+            )
+
+            result[group_name] = tensor
+
+        return result
+
+    # ── Validation ──────────────────────────────────
+
+    def _validate(self, df: pd.DataFrame) -> None:
+        """RF-10 structural validation."""
+        if len(df) < self._window_size:
+            raise ValueError(
+                f"DataFrame has {len(df)} rows but window_size={self._window_size}"
+            )
+
+        numeric = df.select_dtypes(include=[np.number])
+
+        # Check for NaN / Inf
+        if numeric.isnull().any().any():
+            nan_cols = numeric.columns[numeric.isnull().any()].tolist()
+            logger.warning("NaN detected in columns: {} — filling with 0", nan_cols)
+            df[nan_cols] = df[nan_cols].fillna(0)
+
+        if np.isinf(numeric.values).any():
+            raise ValueError("Infinite values detected in feature DataFrame")
+
+    # ── Metadata ────────────────────────────────────
+
+    def describe(self, df: pd.DataFrame) -> dict:
+        """Return a summary of what the tensor would look like.
+
+        Useful for the observability endpoint (RNF-4).
+        """
+        numeric = df.select_dtypes(include=[np.number])
+        num_rows = len(df)
+        num_features = len(numeric.columns)
+        num_windows = max(0, num_rows - self._window_size + 1)
+        return {
+            "window_size": self._window_size,
+            "num_features": num_features,
+            "num_rows": num_rows,
+            "num_windows": num_windows,
+            "tensor_shape": [num_windows, self._window_size, num_features],
+            "feature_columns": numeric.columns.tolist(),
+        }
+`````
+
+## File: app/main.py
+`````python
+"""
+IA-APP — FastAPI Application Entry Point.
+
+Initializes the server, registers all routes, and configures
+middleware.  Covers RF-2 (Backend Initialization).
+"""
+
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from app.config import __version__
+from app.api.routes import data, replay, tensor
+from app.api.schemas import HealthResponse
+from app.utils.logger import setup_logging
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan — startup & shutdown hooks."""
+    setup_logging()
+    yield
+
+
+app = FastAPI(
+    title="IA-APP — AI Trading Data Pipeline",
+    description=(
+        "Fase 1: Infraestructura, Servidor y Pipeline de Datos. "
+        "Obtiene, sincroniza, normaliza y entrega tensores de mercado "
+        "multi-temporalidad (1h, 4h, 1d) listos para redes neuronales."
+    ),
+    version=__version__,
+    lifespan=lifespan,
+)
+
+# ── CORS ────────────────────────────────────────────
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ── Routes ──────────────────────────────────────────
+app.include_router(data.router)
+app.include_router(tensor.router)
+app.include_router(replay.router)
+
+
+# ── Health ──────────────────────────────────────────
+@app.get("/health", response_model=HealthResponse, tags=["System"])
+def health_check():
+    """Endpoint de salud del servidor."""
+    return HealthResponse(status="ok", version=__version__)
+`````
+
+## File: app/utils/logger.py
+`````python
+"""
+Centralized logging configuration using Loguru.
+
+Provides structured, colored console output and optional file rotation.
+Satisfies RNF-4 (Observability).
+"""
+
+import sys
+
+from loguru import logger
+
+from app.config import settings
+
+
+def setup_logging() -> None:
+    """Configure Loguru for the application."""
+    # Remove default handler
+    logger.remove()
+
+    # Console handler — colorized, with context
+    log_level = "DEBUG" if settings.app_debug else "INFO"
+    logger.add(
+        sys.stderr,
+        level=log_level,
+        format=(
+            "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | "
+            "<level>{level: <8}</level> | "
+            "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> — "
+            "<level>{message}</level>"
+        ),
+        colorize=True,
+    )
+
+    # File handler — rotated daily, kept 7 days
+    logger.add(
+        "logs/ia_app_{time:YYYY-MM-DD}.log",
+        rotation="1 day",
+        retention="7 days",
+        level="DEBUG",
+        format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} — {message}",
+    )
+
+    logger.info("Logging initialized — level={}", log_level)
+`````
+
+## File: README.md
+`````markdown
+# IA-APP: Estrategia de Inversión Cuantitativa
+
+Este proyecto implementa una **Inteligencia Artificial** especializada en mercados financieros, diseñada para generar señales de compra y venta con objetivos de rentabilidad superiores al 10%. El sistema integra técnicas avanzadas de Deep Learning con metodologías cuantitativas de vanguardia.
+
+## Características Principales
+
+- **Deep Reinforcement Learning (DRL):** El agente aprende directamente de los resultados financieros, optimizando la estrategia en entornos simulados antes de operar en real.
+- **Arquitectura Multimodal (xLSTM):** Integra información de precios, volumen, indicadores técnicos y sentimiento de mercado para tomar decisiones holísticas.
+- **Gestión de Riesgo Avanzada:** Implementa el **Triple Barrier Method** y **Differentiable Sharpe Ratio** para asegurar ratios riesgo/beneficio favorables (objetivo 1:4) y evitar el _overfitting_.
+- **Estructura Modular (RF-1 a RF-11):** El código sigue una arquitectura estricta que separa la recolección de datos, cálculo de indicadores, construcción de tensores y lógica de inferencia.
+
+## Arquitectura Técnica
+
+El sistema está organizado en los siguientes módulos principales:
+
+1.  **Data Fetcher:** Obtiene datos históricos de múltiples temporalidades (1h, 4h, 1d) desde fuentes fiables (Binance, CCXT).
+2.  **Indicator Engine:** Calcula indicadores técnicos (SMA, EMA, MACD, Bollinger Bands, etc.) utilizando la librería `ta`.
+3.  **Tensor Builder:** Estructura los datos en tensores 3D para el entrenamiento de redes neuronales, preservando el orden temporal.
+4.  **Model Architecture:** Implementación de redes basadas en **Transformers** y **LSTM** adaptadas a datos financieros (xLSTM, PatchTST).
+5.  **Risk Manager:** Define las condiciones de salida y profit (10%) y stop-loss (2%) para guiar el entrenamiento.
+
+## Instalación y Ejecución
+
+### Requisitos
+
+- Python 3.9+
+- CUDA (para entrenamiento GPU)
+
+### Instalación de Dependencias
+
+```bash
+git clone https://github.com/tuusuario/IA-APP.git
+cd IA-APP
+pip install -r requirements.txt
+```
+
+### Ejecución
+
+- **Entrenamiento:**
+  ```bash
+  python train.py --symbol BTC/USDT --epochs 50 --window-size 30
+  ```
+- **Inferencia (Modo Replay):**
+  ```bash
+  python main.py --mode replay --symbol BTC/USDT --speed 2.0
+  ```
+
+## 📊 Estrategia de Mercado
+
+- **Símbolo:** BTC/USDT
+- **Objetivo de Profit:** +10% por operación.
+- **Stop Loss:** -2%.
+- **Horizonte:** Corto / Medio plazo.
+- **Temporalidades:** 1h, 4h, 1d (sincronizadas).
+`````
+
+## File: requirements.txt
+`````
+# ── Server ──────────────────────────────────────────
+fastapi>=0.115.0
+uvicorn[standard]>=0.34.0
+pydantic>=2.11.0
+pydantic-settings>=2.9.0
+python-dotenv>=1.0.0
+
+# ── Data Ingestion ──────────────────────────────────
+ccxt>=4.5.0
+
+# ── Data Processing & Analysis ──────────────────────
+pandas>=2.2.0
+numpy>=2.1.0
+ta>=0.11.0
+
+# ── Time-Series & Replay ───────────────────────────
+darts>=0.32.0
+backtrader>=1.9.78.123
+
+# ── Tensor / Deep Learning Backend ──────────────────
+torch>=2.6.0
+
+# ── Observability & Logging ─────────────────────────
+loguru>=0.7.0
+
+# ── Testing ─────────────────────────────────────────
+pytest>=8.0.0
+httpx>=0.28.0
+`````
+
+## File: app/api/routes/replay.py
+`````python
+"""
+Replay endpoints — start, stop, and status of market replay sessions.
+Covers RF-5 (Market Replay) exposure via API.
+
+Uses BacktraderReplay to reconstruct 4h and 1d candles from 1h data,
+providing more realistic backtesting than pre-built candles.
+
+Each replay step integrates with the full tensor pipeline:
+fetch 1h → reconstruct 4h/1d → indicators → sync → normalize → tensor.
+"""
+
+import asyncio
+from typing import Any
+
+from fastapi import APIRouter, HTTPException
+import pandas as pd
+import torch
+
+from app.api.schemas import PipelineStatus, ReplayRequest
+from app.config import settings
+from app.core.data_ingestion.historical import HistoricalDataFetcher
+from app.core.data_ingestion.replay_backtrader import BacktraderReplay
+from app.core.processing.indicators import IndicatorEngine
+from app.core.processing.normalizer import Normalizer
+from app.core.sync.multi_timeframe import MultiTimeframeSync
+from app.core.tensor.builder import TensorBuilder
+
+router = APIRouter(prefix="/replay", tags=["Market Replay"])
+
+_historical = HistoricalDataFetcher()
+_sync = MultiTimeframeSync()
+_normalizer = Normalizer()
+_builder = TensorBuilder()
+
+_current_replay: BacktraderReplay | None = None
+_current_step: int = 0
+_tensors_grouped: list[dict[str, torch.Tensor]] = []
+_replay_active: bool = False
+
+
+@router.post("/start")
+async def start_replay(req: ReplayRequest):
+    """Start a new market replay session using Backtrader data replay.
+
+    Fetches 1h historical data (last 2+ months), then uses Backtrader to reconstruct 4h and 1d
+    candles in real-time as the replay progresses.
+
+    Each step executes the full pipeline:
+    1. Take 1h window + historical buffer for indicators
+    2. Reconstruct 4h via backtrader replay
+    3. Reconstruct 1d via backtrader replay
+    4. Compute indicators on combined data
+    5. Synchronize timeframes
+    6. Normalize
+    7. Build tensor
+
+    Returns:
+        status, total_steps, speed multiplier
+    """
+    global _current_replay, _current_step, _tensors, _replay_active
+
+    if _current_replay and _current_replay.is_active:
+        raise HTTPException(status_code=409, detail="Replay already running — stop it first")
+
+    try:
+        since = req.since or (req.until if req.until else None)
+        until = req.until
+
+        raw_1h = _historical.fetch(
+            symbol=req.symbol,
+            timeframe="1h",
+            since=since,
+            until=until,
+        )
+
+        min_indicators_buffer = 100
+        
+        historical_buffer = None
+        if len(raw_1h) > settings.tensor_window_size + min_indicators_buffer:
+            historical_buffer = raw_1h.iloc[:-(settings.tensor_window_size + min_indicators_buffer)].copy()
+            raw_1h = raw_1h.iloc[-(settings.tensor_window_size + min_indicators_buffer):].copy()
+
+        _current_replay = BacktraderReplay(
+            data_1h=raw_1h,
+            window_size=settings.tensor_window_size,
+            speed_multiplier=req.speed_multiplier,
+            refresh_seconds=settings.replay_refresh_seconds,
+            historical_buffer=historical_buffer,
+        )
+        _current_step = 0
+        _tensors_grouped = []
+        _replay_active = True
+
+        asyncio.create_task(_run_replay())
+
+        return {
+            "status": "started",
+            "total_steps": _current_replay.total_steps,
+            "speed": req.speed_multiplier,
+            "window_size": settings.tensor_window_size,
+            "buffer_hours": len(historical_buffer) if historical_buffer is not None else 0,
+            "note": "Using Backtrader replay: 1h → 4h/1d reconstruction with historical buffer",
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.post("/stop")
+def stop_replay():
+    """Stop the currently running replay."""
+    global _current_replay, _replay_active
+    if _current_replay:
+        _current_replay.stop()
+        _replay_active = False
+        return {
+            "status": "stopped",
+            "step": _current_step,
+            "tensors_built": len(_tensors_grouped),
+        }
+    return {"status": "no_replay_running"}
+
+
+@router.get("/status", response_model=PipelineStatus)
+def replay_status():
+    """Return the current replay status."""
+    return PipelineStatus(
+        mode="replay" if _replay_active else "idle",
+        replay_active=_replay_active,
+        replay_step=_current_step if _replay_active else None,
+        replay_total_steps=_current_replay.total_steps if _current_replay else None,
+    )
+
+
+@router.get("/tensors")
+def get_tensors():
+    """Return the tensors built during replay (grouped by indicator category)."""
+    if not _tensors_grouped:
+        return {"count": 0, "shapes": {}}
+
+    shapes = []
+    for tg in _tensors_grouped:
+        step_shapes = {k: list(v.shape) if v is not None else None for k, v in tg.items()}
+        shapes.append(step_shapes)
+
+    return {
+        "count": len(_tensors_grouped),
+        "shapes": shapes,
+    }
+
+
+@router.get("/tensor/{step}/{grupo}")
+def get_tensor_by_group(step: int, grupo: str):
+    """Get tensor for a specific step and group (velocidad/tendencia/amplitud/liquidez)."""
+    valid_groups = ["velocidad", "tendencia", "amplitud", "liquidez"]
+    if grupo not in valid_groups:
+        raise HTTPException(status_code=400, detail=f"Grupo inválido. Available: {valid_groups}")
+
+    if step < 0 or step >= len(_tensors_grouped):
+        raise HTTPException(status_code=404, detail=f"Step {step} not found")
+
+    tensor = _tensors_grouped[step].get(grupo)
+    if tensor is None:
+        raise HTTPException(status_code=404, detail=f"Tensor for grupo '{grupo}' at step {step} is None")
+
+    return {
+        "step": step,
+        "grupo": grupo,
+        "shape": list(tensor.shape),
+        "data": tensor.numpy().tolist(),
+    }
+
+
+async def _run_replay():
+    """Consume the replay stream and build tensors."""
+    global _current_step, _replay_active
+
+    if not _current_replay:
+        return
+
+    try:
+        async for window in _current_replay.stream():
+            if not _replay_active:
+                break
+
+            step = window["step"]
+            _current_step = step + 1
+
+            try:
+                data = {
+                    "1h": window["combined_1h"],
+                    "4h": window["combined_4h"],
+                    "1d": window["combined_1d"],
+                }
+
+                with_indicators = IndicatorEngine.compute_multi_timeframe(data)
+
+                synced = _sync.synchronize(with_indicators)
+                synced = MultiTimeframeSync.add_global_features(synced)
+
+                synced = _add_replay_progress(synced, window)
+
+                logger.info("=== Step {} - ALL COLUMNS (sync) ===".format(step))
+                logger.info("Shape: {} rows x {} cols".format(synced.shape[0], synced.shape[1]))
+                logger.info("Columns: {}".format(list(synced.columns)))
+                logger.info("Last row (all cols): {}".format(synced.iloc[-1].to_dict()))
+
+                normalized = synced  # Sin normalizacion - usar datos crudos
+
+                tensors_grouped = _builder.build_grouped(normalized)
+                _tensors_grouped.append(tensors_grouped)
+
+                shapes_str = ", ".join([f"{k}:{v.shape[1:] if v is not None else 'None'}" for k, v in tensors_grouped.items()])
+                logger.info(
+                    "[Step {}/{}] Tensores: {}",
+                    _current_step,
+                    _current_replay.total_steps,
+                    shapes_str,
+                )
+
+            except Exception as e:
+                logger.error("Error building tensor at step {}: {}", _current_step, e)
+
+        _replay_active = False
+        logger.success("Replay finished — {} steps completed".format(len(_tensors_grouped)))
+
+        logger.info("=== FINAL TENSORS ===")
+        for group_name, tensor in _tensors_grouped[-1].items():
+            if tensor is not None:
+                logger.info("Grupo: {} | Shape: {} | Indicadores count: {}".format(
+                    group_name,
+                    list(tensor.shape),
+                    tensor.shape[2] - 3
+                ))
+                logger.info("Tensor {} (no normalized) - last row sample: {}".format(
+                    group_name,
+                    tensor[0, -1, :10].tolist()
+                ))
+
+    except Exception as e:
+        logger.error("Replay error: {}", e)
+        _replay_active = False
+
+
+def _add_replay_progress(df: pd.DataFrame, window: dict) -> pd.DataFrame:
+    """Add progress_vela columns from replay window to the synchronized DataFrame.
+
+    Uses the replay_1h, replay_4h, replay_1d data to get the current progress values.
+    """
+    result = df.copy()
+
+    progress_1h = window["replay_1h"]["progress_vela"].iloc[-1] if "progress_vela" in window["replay_1h"].columns else 1.0
+
+    progress_4h = 0.0
+    if not window["replay_4h"].empty and "progress_vela" in window["replay_4h"].columns:
+        progress_4h = window["replay_4h"]["progress_vela"].iloc[-1]
+
+    progress_1d = 0.0
+    if not window["replay_1d"].empty and "progress_vela" in window["replay_1d"].columns:
+        progress_1d = window["replay_1d"]["progress_vela"].iloc[-1]
+
+    result["progress_vela_1h"] = progress_1h
+    result["progress_vela_4h"] = progress_4h
+    result["progress_vela_1d"] = progress_1d
+
+    return result
+
+
+from loguru import logger
+`````

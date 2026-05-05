@@ -11,7 +11,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import __version__
-from app.api.routes import data, replay, tensor
+from app.api.routes import data, replay  # tensor deshabilitado
 from app.api.schemas import HealthResponse
 from app.utils.logger import setup_logging
 
@@ -44,8 +44,8 @@ app.add_middleware(
 
 # ── Routes ──────────────────────────────────────────
 app.include_router(data.router)
-app.include_router(tensor.router)
 app.include_router(replay.router)
+# app.include_router(tensor.router)  # deshabilitado
 
 
 # ── Health ──────────────────────────────────────────

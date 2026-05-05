@@ -48,11 +48,11 @@ class IndicatorEngine:
         ("EMA_22", lambda df: ta.trend.EMAIndicator(df["close"], window=22).ema_indicator()),
         ("EMA_50", lambda df: ta.trend.EMAIndicator(df["close"], window=50).ema_indicator()),
         ("EMA_100", lambda df: ta.trend.EMAIndicator(df["close"], window=100).ema_indicator()),
-        ("ICHIMOKU_TENKAN", lambda df: _ichimoku_tenkan(df)),
-        ("ICHIMOKU_KIJUN", lambda df: _ichimoku_kijun(df)),
-        ("ICHIMOKU_SA", lambda df: _ichimoku_senkou_a(df)),
-        ("ICHIMOKU_SB", lambda df: _ichimoku_senkou_b(df)),
-        ("ICHIMOKU_CHIKOU", lambda df: _ichimoku_chikou(df)),
+        ("ICHIMOKU_TENKAN", lambda df: IndicatorEngine._ichimoku_tenkan(df)),
+        ("ICHIMOKU_KIJUN", lambda df: IndicatorEngine._ichimoku_kijun(df)),
+        ("ICHIMOKU_SA", lambda df: IndicatorEngine._ichimoku_senkou_a(df)),
+        ("ICHIMOKU_SB", lambda df: IndicatorEngine._ichimoku_senkou_b(df)),
+        ("ICHIMOKU_CHIKOU", lambda df: IndicatorEngine._ichimoku_chikou(df)),
     ]
 
     # ===================== AMPLITUD =====================
@@ -62,9 +62,9 @@ class IndicatorEngine:
         ("BB_MIDDLE", lambda df: ta.volatility.BollingerBands(df["close"]).bollinger_mavg()),
         ("BB_LOWER", lambda df: ta.volatility.BollingerBands(df["close"]).bollinger_lband()),
         ("BB_WIDTH", lambda df: (ta.volatility.BollingerBands(df["close"]).bollinger_hband() - ta.volatility.BollingerBands(df["close"]).bollinger_lband()) / ta.volatility.BollingerBands(df["close"]).bollinger_mavg()),
-        ("KELTNER_UPPER", lambda df: _keltner_upper(df)),
+        ("KELTNER_UPPER", lambda df: IndicatorEngine._keltner_upper(df)),
         ("KELTNER_MIDDLE", lambda df: ta.trend.EMAIndicator(df["close"], window=20).ema_indicator()),
-        ("KELTNER_LOWER", lambda df: _keltner_lower(df)),
+        ("KELTNER_LOWER", lambda df: IndicatorEngine._keltner_lower(df)),
     ]
 
     # ===================== LIQUIDEZ =====================
@@ -143,24 +143,43 @@ class IndicatorEngine:
         result = df.copy()
         suffix = f"_{timeframe_suffix}" if timeframe_suffix else ""
 
+        # Skip heavy indicators if not enough data
+        min_rows = 60
+        has_enough_data = len(df) >= min_rows
+        
+        if not has_enough_data:
+            # logger.warning(f"DataFrame has only {len(df)} rows, need {min_rows} for full indicators")
+            pass
+
         total_indicators = 0
 
         for group_name, indicators in cls._GROUPS.items():
             for label, fn in indicators:
                 col_name = f"{label}{suffix}"
                 try:
+                    # Skip indicators requiring more data than available
+                    if label in ("EMA_50", "EMA_100", "ICHIMOKU_SB", "ADX", "DI_PLUS", "DI_MINUS", 
+                               "KELTNER_UPPER", "KELTNER_MIDDLE", "KELTNER_LOWER"):
+                        required_rows = {"EMA_50": 50, "EMA_100": 100, "ICHIMOKU_SB": 52,
+                                        "ADX": 14, "DI_PLUS": 14, "DI_MINUS": 14,
+                                        "KELTNER_UPPER": 20, "KELTNER_MIDDLE": 20, "KELTNER_LOWER": 20}
+                        if len(df) < required_rows.get(label, 60):
+                            result[col_name] = float("nan")
+                            total_indicators += 1
+                            continue
+                    
                     result[col_name] = fn(result)
                 except Exception as exc:
-                    logger.warning("Indicator {} failed: {}", col_name, exc)
+                    # logger.warning("Indicator {} failed: {}", col_name, exc)
                     result[col_name] = float("nan")
                 total_indicators += 1
 
-        logger.debug(
-            "Computed {} indicators for {} (suffix={})",
-            total_indicators,
-            group_name,
-            suffix,
-        )
+        # logger.debug(
+        #     "Computed {} indicators for {} (suffix={})",
+        #     total_indicators,
+        #     group_name,
+        #     suffix,
+        # )
         return result
 
     @classmethod
@@ -185,7 +204,13 @@ class IndicatorEngine:
     @classmethod
     def compute_multi_timeframe(cls, data: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
         """Compute indicators for each timeframe in the dict."""
-        return {tf: cls.compute(df, timeframe_suffix=tf) for tf, df in data.items()}
+        result = {}
+        for tf, df in data.items():
+            df_with_indicators = cls.compute(df, timeframe_suffix=tf)
+            numeric_cols = df_with_indicators.select_dtypes(include=['float64', 'float32', 'int64', 'int32']).columns
+            df_with_indicators[numeric_cols] = df_with_indicators[numeric_cols].round(2)
+            result[tf] = df_with_indicators
+        return result
 
     @classmethod
     def get_group_columns(cls, group: str, timeframe_suffix: str = "") -> list[str]:

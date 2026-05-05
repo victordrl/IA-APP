@@ -1,55 +1,32 @@
 """
 RF-5: Backtrader Data Replay - Reconstruct higher timeframes from 1h data.
 
-Uses backtrader's replay feature to simulate how 4h and 1d candles develop
-from 1h input data, providing more realistic backtesting than pre-built candles.
+LOGICA DEL REPLAY:
+1. Fetch 1h del rango completo (ej: 2026-01-01 a 2026-05-01)
+2. Warmup: primeros 2400 datos (~100 días) para indicadores completos
+3. Por cada step posterior:
+   - Agregar 1 vela 1h al buffer
+   - Acumular datos en vela 4h (cerrar cada 4 steps)
+   - Acumular datos en vela 1d (cerrar cada 24 steps)
+4. Retornar buffers con TODOS los datos acumulados + vela en progreso
+5. Los indicadores usan todos los datos del buffer
 """
 
 import asyncio
 from datetime import datetime
 from typing import AsyncGenerator
 
-import backtrader as bt
 import pandas as pd
 from loguru import logger
 
-
-class PandasDataFrameFeed(bt.feeds.PandasData):
-    """Custom data feed that accepts a DataFrame directly."""
-
-    params = (
-        ("datetime", None),
-        ("open", "open"),
-        ("high", "high"),
-        ("low", "low"),
-        ("close", "close"),
-        ("volume", "volume"),
-        ("openinterest", -1),
-    )
-
-
-class _EmptyStrategy(bt.Strategy):
-    """Estrategia vacía requerida para que backtrader procese los datos."""
-
-    def __init__(self):
-        pass
-
-    def next(self):
-        pass
+from app.config import settings
 
 
 class BacktraderReplay:
-    """Replay 1h data and reconstruct 4h and 1d using backtrader's replay feature.
+    """Replay 1h data and reconstruct 4h/1d with dynamic buffers.
 
-    Instead of fetching pre-built 4h/1d candles, this class takes 1h candles and
-    uses backtrader to reconstruct how the higher timeframes would have formed
-    in real-time.
-
-    Flow per step:
-    1. Take 1h window of data
-    2. Reconstruct 4h via replay (4 candles = 1 x 4h)
-    3. Reconstruct 1d via replay (24 candles = 1 x 1d)
-    4. Yield {1h: df, "4h_recon": df, "1d_recon": df} with debug output
+    Los buffers startan con warmup de datos históricos para indicadores completos.
+    La vela en progreso siempre es parte del buffer (desde el inicio).
     """
 
     def __init__(
@@ -59,175 +36,218 @@ class BacktraderReplay:
         speed_multiplier: float = 1.0,
         refresh_seconds: float = 5.0,
     ):
-        """
-        Args:
-            data_1h: DataFrame with 1h OHLCV data (timestamp, open, high, low, close, volume)
-            window_size: Number of rows per sliding window (default: 30)
-            speed_multiplier: Speed factor for replay (1.0 = real-time speed)
-            refresh_seconds: Base interval between emissions in seconds
-        """
-        self._window_size = window_size or 30
+        self._window_size = window_size or settings.tensor_window_size
+        self._indicators_warmup = settings.replay_indicators_warmup  # 2400
         self._speed = speed_multiplier
         self._refresh = refresh_seconds
         self._active = False
 
+        # Datos 1h - asegurar que tiene índice de timestamp
         self._data_1h = data_1h.copy()
-        self._data_1h = self._data_1h.set_index("timestamp").sort_index()
+        if "timestamp" in self._data_1h.columns:
+            self._data_1h = self._data_1h.set_index("timestamp").sort_index()
         self._data_1h.index = pd.DatetimeIndex(self._data_1h.index)
 
-        self._max_steps = max(0, len(self._data_1h) - self._window_size)
+        # Total de datos disponibles para replay
+        self._total_1h = len(self._data_1h)
+
+        # Validar que hay suficientes datos para warmup + replay
+        min_required = self._indicators_warmup + 1  # al menos 1 step
+        if self._total_1h < min_required:
+            raise ValueError(
+                f"Insufficient data: {self._total_1h} rows. "
+                f"Need at least {self._indicators_warmup} for indicators warmup (~100 days). "
+                f"Requested range provides {self._total_1h - self._indicators_warmup} replay steps."
+            )
+
+        # Warmup: primeros 2400 datos para indicadores
+        self._warmup_end = self._indicators_warmup
+        self._max_steps = self._total_1h - self._warmup_end
+
+        # Fecha real de inicio del step 1
+        self._first_step_date = self._data_1h.index[self._warmup_end]
+
+        # Buffers dinámicos - startan con warmup data
+        self._buffer_1h = self._data_1h.iloc[:self._warmup_end].copy().reset_index()
+        self._buffer_1h["progress_vela"] = 1.0
+
+        # Pre-calcular 4h y 1d del warmup
+        self._buffer_4h = self._build_warmup_timeframes(self._buffer_1h, "4h")
+        self._buffer_1d = self._build_warmup_timeframes(self._buffer_1h, "1d")
+
+        # Inicializar velas en progreso con el primer dato del replay
+        first_replay_idx = self._data_1h.index[self._warmup_end]
+        first_row = self._data_1h.iloc[self._warmup_end]
+        self._current_4h = self._init_4h_candle(first_replay_idx, first_row)
+        self._current_1d = self._init_1d_candle(first_replay_idx, first_row)
+
+        # Agregar vela en progreso actual al buffer para visualización
+        self._buffer_4h = pd.concat([self._buffer_4h, pd.DataFrame([self._current_4h])], ignore_index=True)
+        self._buffer_1d = pd.concat([self._buffer_1d, pd.DataFrame([self._current_1d])], ignore_index=True)
 
         logger.info(
-            "BacktraderReplay initialized — window={}, speed={}×, steps={}, total_1h_rows={}",
-            self._window_size,
-            self._speed,
+            "BacktraderReplay initialized — warmup={} (~100 days), steps={}, total_1h={}",
+            self._warmup_end,
             self._max_steps,
-            len(self._data_1h),
+            self._total_1h,
+        )
+        logger.info(
+            "Replay range: {} to {}",
+            self._data_1h.index[0],
+            self._data_1h.index[-1],
+        )
+        logger.info(
+            "Step 1 starts at: {} (date: {})",
+            self._warmup_end,
+            self._first_step_date,
         )
 
-    def _reconstruct_timeframe(self, df: pd.DataFrame, target_timeframe: str, compression: int) -> pd.DataFrame:
-        """Use backtrader to reconstruct a higher timeframe from 1h data."""
-        df_reset = df.copy()
-        
-        if "timestamp" in df_reset.columns:
-            df_reset["datetime"] = pd.to_datetime(df_reset["timestamp"])
-        elif "index" in df_reset.columns:
-            df_reset["datetime"] = pd.to_datetime(df_reset["index"])
-        else:
-            df_reset["datetime"] = df_reset.index
-            if hasattr(df_reset.index, 'to_pydatetime'):
-                df_reset["datetime"] = df_reset.index.to_pydatetime()
-            else:
-                df_reset["datetime"] = pd.to_datetime(df_reset["datetime"])
+    def _init_4h_candle(self, timestamp, row) -> dict:
+        """Inicializar vela de 4h."""
+        return {
+            "timestamp": timestamp,
+            "open": float(row["open"]),
+            "high": float(row["high"]),
+            "low": float(row["low"]),
+            "close": float(row["close"]),
+            "volume": float(row["volume"]),
+            "progress_vela": 0.25,
+        }
 
-        for col in ["open", "high", "low", "close", "volume"]:
-            if col in df_reset.columns:
-                df_reset[col] = df_reset[col].astype(float)
+    def _init_1d_candle(self, timestamp, row) -> dict:
+        """Inicializar vela de 1d."""
+        return {
+            "timestamp": timestamp,
+            "open": float(row["open"]),
+            "high": float(row["high"]),
+            "low": float(row["low"]),
+            "close": float(row["close"]),
+            "volume": float(row["volume"]),
+            "progress_vela": 1 / 24,
+        }
 
-        data_feed = PandasDataFrameFeed(
-            dataname=df_reset,
-            datetime=0,
-            open="open",
-            high="high",
-            low="low",
-            close="close",
-            volume="volume",
-            openinterest=-1,
-        )
+    def _build_warmup_timeframes(self, df_1h: pd.DataFrame, target: str) -> pd.DataFrame:
+        """Build 4h or 1d from warmup 1h data."""
+        compression = 4 if target == "4h" else 24
+        rows = []
 
-        cerebro = bt.Cerebro()
-        cerebro.adddata(data_feed)
+        for i in range(compression, len(df_1h) + 1, compression):
+            chunk = df_1h.iloc[i - compression:i]
+            if chunk.empty:
+                continue
+            rows.append({
+                "timestamp": chunk["timestamp"].iloc[-1],
+                "open": chunk["open"].iloc[0],
+                "high": chunk["high"].max(),
+                "low": chunk["low"].min(),
+                "close": chunk["close"].iloc[-1],
+                "volume": chunk["volume"].sum(),
+                "progress_vela": 1.0,
+            })
 
-        if target_timeframe == "4h":
-            cerebro.replaydata(
-                data_feed,
-                timeframe=bt.TimeFrame.Minutes,
-                compression=240,
-            )
-        elif target_timeframe == "1d":
-            cerebro.replaydata(
-                data_feed,
-                timeframe=bt.TimeFrame.Days,
-                compression=24,
-            )
+        return pd.DataFrame(rows)
 
-        cerebro.addstrategy(_EmptyStrategy)
+    @property
+    def first_step_date(self):
+        """Retorna la fecha real donde comienza el step 1."""
+        return self._first_step_date
 
-        cerebro.run()
-        
-        result_rows = []
-        
-        # En backtrader con replaydata, solo se puede acceder a la barra actual (índice 0)
-        # ya que el replay va construyendo la barra en tiempo real
-        if len(cerebro.datas) > 1:
-            replay_data = cerebro.datas[1]
-            data_len = len(replay_data)
-            logger.debug(f"Reconstructed {target_timeframe}: {data_len} bars")
-            
-            # Solo accedemos a la barra 0 (la barra actual en construcción)
-            if data_len > 0:
-                try:
-                    result_rows.append(
-                        {
-                            "timestamp": replay_data.datetime[0],
-                            "open": float(replay_data.open[0]),
-                            "high": float(replay_data.high[0]),
-                            "low": float(replay_data.low[0]),
-                            "close": float(replay_data.close[0]),
-                            "volume": float(replay_data.volume[0] if replay_data.volume[0] else 0),
-                        }
-                    )
-                except Exception as e:
-                    logger.warning("Error accessing replay data: {}", e)
+    async def stream(self) -> AsyncGenerator[dict, None]:
+        """Async generator que yield buffers dinámicos por cada step.
 
-        if result_rows:
-            result_df = pd.DataFrame(result_rows)
-            # Convertir a datetime64[ms, UTC] para consistencia con datos de Binance
-            result_df["timestamp"] = pd.to_datetime(result_df["timestamp"]).dt.tz_localize("UTC")
-            return result_df
-
-        return pd.DataFrame(
-            columns=["timestamp", "open", "high", "low", "close", "volume"]
-        )
-
-    async def stream(self) -> AsyncGenerator[dict[str, pd.DataFrame], None]:
-        """Async generator that yields one window per step with reconstructed timeframes."""
+        Yields:
+            - buffer_1h: DataFrame con todas las velas 1h acumuladas
+            - buffer_4h: DataFrame con velas 4h (cerradas + en progreso)
+            - buffer_1d: DataFrame con velas 1d (cerradas + en progreso)
+            - step: número de step actual
+        """
         self._active = True
         delay = self._refresh / self._speed
 
+        # El replay starts desde warmup_end
         for step in range(self._max_steps):
             if not self._active:
                 logger.info("Replay stopped at step {}/{}", step, self._max_steps)
                 return
 
-            window_1h = self._data_1h.iloc[step : step + self._window_size].copy()
-            window_1h = window_1h.reset_index()
-            window_1h["progress_vela"] = 1.0
+            # Índice del dato 1h actual (del range total)
+            data_idx = self._warmup_end + step
+            current_timestamp = self._data_1h.index[data_idx]
+            current_row = self._data_1h.iloc[data_idx]
 
-            logger.debug("Replay step {}/{}", step + 1, self._max_steps)
+            # Agregar al buffer 1h
+            new_1h_row = {
+                "timestamp": current_timestamp,
+                "open": float(current_row["open"]),
+                "high": float(current_row["high"]),
+                "low": float(current_row["low"]),
+                "close": float(current_row["close"]),
+                "volume": float(current_row["volume"]),
+                "progress_vela": 1.0,
+            }
+            self._buffer_1h = pd.concat([self._buffer_1h, pd.DataFrame([new_1h_row])], ignore_index=True)
 
-            logger.info(f"[Step {step + 1}/{self._max_steps}]")
-            logger.info("  1h:        {} | O:{:.2f} H:{:.2f} L:{:.2f} C:{:.2f} V:{:.0f}".format(
-                window_1h["timestamp"].iloc[0].strftime("%Y-%m-%d %H:%M"),
-                window_1h["open"].iloc[0],
-                window_1h["high"].iloc[0],
-                window_1h["low"].iloc[0],
-                window_1h["close"].iloc[0],
-                window_1h["volume"].iloc[0],
-            ))
+            # Actualizar 4h
+            step_in_4h = step % 4
+            progress_4h = (step_in_4h + 1) / 4.0
 
-            df_4h = self._reconstruct_timeframe(window_1h, "4h", 240)
-            if not df_4h.empty:
-                progress_4h = ((step % 4) + 1) / 4.0
-                df_4h["progress_vela"] = progress_4h
-                logger.info("  4h_recon:  {} | O:{:.2f} H:{:.2f} L:{:.2f} C:{:.2f} V:{:.0f} | P:{:.2f}".format(
-                    df_4h["timestamp"].iloc[0].strftime("%Y-%m-%d"),
-                    df_4h["open"].iloc[0],
-                    df_4h["high"].iloc[0],
-                    df_4h["low"].iloc[0],
-                    df_4h["close"].iloc[0],
-                    df_4h["volume"].iloc[0],
-                    progress_4h,
-                ))
+            if self._current_4h is not None:
+                self._current_4h["high"] = max(self._current_4h["high"], new_1h_row["high"])
+                self._current_4h["low"] = min(self._current_4h["low"], new_1h_row["low"])
+                self._current_4h["close"] = new_1h_row["close"]
+                self._current_4h["volume"] += new_1h_row["volume"]
+                self._current_4h["progress_vela"] = progress_4h
+                self._current_4h["timestamp"] = current_timestamp
 
-            df_1d = self._reconstruct_timeframe(window_1h, "1d", 24)
-            if not df_1d.empty:
-                progress_1d = ((step % 24) + 1) / 24.0
-                df_1d["progress_vela"] = progress_1d
-                logger.info("  1d_recon:  {} | O:{:.2f} H:{:.2f} L:{:.2f} C:{:.2f} V:{:.0f} | P:{:.2f}".format(
-                    df_1d["timestamp"].iloc[0].strftime("%Y-%m-%d"),
-                    df_1d["open"].iloc[0],
-                    df_1d["high"].iloc[0],
-                    df_1d["low"].iloc[0],
-                    df_1d["close"].iloc[0],
-                    df_1d["volume"].iloc[0],
-                    progress_1d,
-                ))
+                # Si es el último del grupo de 4, cerrar y crear nueva
+                if step_in_4h == 3:
+                    self._current_4h["progress_vela"] = 1.0
+                    closed_4h = self._current_4h.copy()
+                    self._buffer_4h = pd.concat([self._buffer_4h, pd.DataFrame([closed_4h])], ignore_index=True)
+
+                    # Crear nueva vela
+                    if data_idx + 1 < self._total_1h:
+                        next_timestamp = self._data_1h.index[data_idx + 1]
+                        next_row = self._data_1h.iloc[data_idx + 1]
+                        self._current_4h = self._init_4h_candle(next_timestamp, next_row)
+
+            # Actualizar 1d
+            step_in_1d = step % 24
+            progress_1d = (step_in_1d + 1) / 24.0
+
+            if self._current_1d is not None:
+                self._current_1d["high"] = max(self._current_1d["high"], new_1h_row["high"])
+                self._current_1d["low"] = min(self._current_1d["low"], new_1h_row["low"])
+                self._current_1d["close"] = new_1h_row["close"]
+                self._current_1d["volume"] += new_1h_row["volume"]
+                self._current_1d["progress_vela"] = progress_1d
+                self._current_1d["timestamp"] = current_timestamp
+
+                # Si es el último del grupo de 24, cerrar y crear nueva
+                if step_in_1d == 23:
+                    self._current_1d["progress_vela"] = 1.0
+                    closed_1d = self._current_1d.copy()
+                    self._buffer_1d = pd.concat([self._buffer_1d, pd.DataFrame([closed_1d])], ignore_index=True)
+
+                    # Crear nueva vela
+                    if data_idx + 1 < self._total_1h:
+                        next_timestamp = self._data_1h.index[data_idx + 1]
+                        next_row = self._data_1h.iloc[data_idx + 1]
+                        self._current_1d = self._init_1d_candle(next_timestamp, next_row)
+
+            # Log simplificado
+            logger.info(
+                f"[Step {step + 1}/{self._max_steps}] | "
+                f"1h: {len(self._buffer_1h)} | "
+                f"4h: {len(self._buffer_4h)} (p:{progress_4h:.2f}) | "
+                f"1d: {len(self._buffer_1d)} (p:{progress_1d:.2f})"
+            )
 
             yield {
-                "1h": window_1h,
-                "4h_recon": df_4h,
-                "1d_recon": df_1d,
+                "buffer_1h": self._buffer_1h.copy(),
+                "buffer_4h": self._buffer_4h.copy(),
+                "buffer_1d": self._buffer_1d.copy(),
+                "step": step,
             }
 
             await asyncio.sleep(delay)
@@ -241,10 +261,8 @@ class BacktraderReplay:
 
     @property
     def is_active(self) -> bool:
-        """Check if replay is currently running."""
         return self._active
 
     @property
     def total_steps(self) -> int:
-        """Total number of replay steps available."""
         return self._max_steps

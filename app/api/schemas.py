@@ -23,6 +23,8 @@ class ReplayRequest(BaseModel):
     since: str | None = Field(None)
     until: str | None = Field(None)
     speed_multiplier: float = Field(1.0, ge=0.1, le=100.0)
+    sync_type: str | None = Field(None, description="timeframe | merged | semantic (default from config)")
+    sync_version: str | None = Field(None, description="ohlcv | indicators (default from config)")
 
 
 # ── Responses ───────────────────────────────────────

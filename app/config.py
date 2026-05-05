@@ -32,11 +32,19 @@ class Settings(BaseSettings):
     default_timeframes: str = "1h,4h,1d"
 
     # ── Tensor ──────────────────────────────────────
-    tensor_window_size: int = 30
+    tensor_window_size: int = 100
+    historical_buffer_hours: int = 1440  # 60 días de 1h = ~2 meses
 
     # ── Replay ──────────────────────────────────────
     replay_speed_multiplier: float = 1.0
     replay_refresh_seconds: float = 5.0
+    replay_indicators_warmup: int = 2400  # ~100 días de 1h para indicadores completos
+
+    # ── Sync ──────────────────────────────────────────
+    # Tipos: "timeframe" | "merged" | "semantic"
+    sync_type: str = "timeframe"
+    # Versión: "ohlcv" | "indicators"
+    sync_version: str = "ohlcv"
 
     @property
     def timeframes_list(self) -> list[str]:
