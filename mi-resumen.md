@@ -44,7 +44,6 @@ app/config.py
 app/core/data_ingestion/historical.py
 app/core/data_ingestion/realtime.py
 app/core/data_ingestion/replay_backtrader.py
-app/core/data_ingestion/replay.py
 app/core/processing/indicators.py
 app/core/processing/normalizer.py
 app/core/sync/multi_timeframe.py
@@ -64,317 +63,6 @@ tests/test_tensor_builder.py
 ```
 
 # Files
-
-## File: run_visualizer.bat
-`````batch
-@echo off
-cd /d C:\Users\PILON\Desktop\Proyectos\IA-APP
-python tests\test_replay_visualizer.py --mock
-pause
-`````
-
-## File: tests/test_replay_visualizer.py
-`````python
-"""
-Replay Visualizer - Muestra el replay en vivo con matplotlib.
-
-Usage:
-    python tests/test_replay_visualizer.py --mock    # Testing sin API
-    python tests/test_replay_visualizer.py       # Con API real
-
-Abre ventana con 3 subplots (1h, 4h, 1d) mostrando:
-- Velas OHLCV
-- Indicadores (RSI, MACD, EMA, Bollinger)  
-- Progress de la vela
-"""
-
-import time
-import threading
-import requests
-import pandas as pd
-import numpy as np
-import matplotlib
-matplotlib.use('TkAgg')
-import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
-from datetime import datetime
-from typing import Dict, Any, Optional
-
-API_BASE = "http://localhost:8000"
-
-PAYLOAD = {
-    "symbol": "BTC/USDT",
-    "since": "2026-02-01T00:00:00",
-    "until": "2026-05-05T09:00:00",
-    "speed_multiplier": 10,
-}
-
-_api_data: Dict[str, Any] = {
-    "active": False,
-    "step": 0,
-    "total": 0,
-    "candles_1h": None,
-    "candles_4h": None,
-    "candles_1d": None,
-    "progress": {"1h": 1.0, "4h": 0.5, "1d": 0.25},
-}
-_stop_event = threading.Event()
-
-
-def start_replay() -> Dict:
-    """Inicia el replay."""
-    print(f"Iniciando replay: {PAYLOAD}")
-    resp = requests.post(f"{API_BASE}/replay/start", json=PAYLOAD, timeout=120)
-    resp.raise_for_status()
-    data = resp.json()
-    print(f"Replay iniciado: total_steps={data.get('total_steps')}, window={data.get('window_size')}")
-    _api_data["total"] = data.get("total_steps", 0)
-    _api_data["active"] = True
-    return data
-
-
-def stop_replay() -> None:
-    """Detiene el replay."""
-    try:
-        requests.post(f"{API_BASE}/replay/stop", timeout=10)
-    except:
-        pass
-    _api_data["active"] = False
-
-
-def poll_loop() -> None:
-    """Hace polling de los datos del replay."""
-    while not _stop_event.is_set():
-        try:
-            status_resp = requests.get(f"{API_BASE}/replay/status", timeout=10)
-            status = status_resp.json()
-
-            if not status.get("replay_active"):
-                print("Replay terminado")
-                break
-
-            step = status.get("replay_step", 0)
-            _api_data["step"] = step
-
-            print(f"Step {step}/{_api_data['total']}")
-
-            if step % 10 == 0:
-                time.sleep(0.5)
-            else:
-                time.sleep(0.1)
-
-        except Exception as e:
-            print(f"Error polling: {e}")
-            time.sleep(0.5)
-
-    _api_data["active"] = False
-
-
-def create_sample_data(tf: str, n: int = 60) -> pd.DataFrame:
-    """Crea datos de ejemplo para testing."""
-    np.random.seed(42)
-
-    start_date = datetime(2026, 2, 1)
-    freq_map = {"1h": "h", "4h": "4h", "1d": "D"}
-    dates = pd.date_range(start=start_date, periods=n, freq=freq_map.get(tf, "h"))
-
-    base_price = 67000
-    returns = np.random.randn(n) * 0.02
-    prices = base_price * np.exp(np.cumsum(returns))
-
-    data = []
-    for i, (date, close) in enumerate(zip(dates, prices)):
-        open_price = close * (1 + np.random.uniform(-0.005, 0.005))
-        high = max(open_price, close) * (1 + abs(np.random.uniform(0, 0.01)))
-        low = min(open_price, close) * (1 - abs(np.random.uniform(0, 0.01)))
-        volume = np.random.randint(500, 2000)
-
-        data.append({
-            "timestamp": date,
-            "open": open_price,
-            "high": high,
-            "low": low,
-            "close": close,
-            "volume": volume,
-        })
-
-    return pd.DataFrame(data)
-
-
-def plot_candlestick(ax: plt.Axes, df: pd.DataFrame, title: str, progress: float = 1.0) -> None:
-    """Grafica velas japonesas."""
-    ax.clear()
-
-    if df is None or df.empty:
-        ax.text(0.5, 0.5, "Sin datos", ha="center", va="center", transform=ax.transAxes, fontsize=14)
-        ax.set_title(title, fontsize=12)
-        return
-
-    n = min(len(df), 60)
-    df = df.tail(n).reset_index(drop=True)
-
-    for i in range(n):
-        row = df.iloc[i]
-        o, h, l, c = row["open"], row["high"], row["low"], row["close"]
-        color = "#26a69a" if c >= o else "#ef5350"
-
-        ax.plot([i, i], [l, h], color=color, linewidth=0.8)
-
-        body_bottom = min(o, c)
-        body_height = abs(c - o)
-        if body_height < 0.1:
-            body_height = max(h - l) * 0.3
-
-        ax.add_patch(plt.Rectangle(
-            (i - 0.35, body_bottom),
-            0.7,
-            body_height,
-            facecolor=color,
-            edgecolor=color,
-            linewidth=0.5,
-        ))
-
-    ax.set_xlim(-1, n)
-    y_min, y_max = df["low"].min() * 0.995, df["high"].max() * 1.005
-    ax.set_ylim(y_min, y_max)
-
-    step = _api_data.get("step", 0)
-    total = _api_data.get("total", 0)
-    ax.set_title(f"{title} | Step: {step}/{total} | Progress: {progress:.0%}", fontsize=12, fontweight="bold")
-    ax.set_ylabel("Price", fontsize=10)
-    ax.grid(True, alpha=0.3)
-
-    ylabel = ax.set_yticks([])
-    for label in ax.get_yticklabels():
-        label.set_fontsize(8)
-
-
-def plot_indicators(ax: plt.Axes, df: pd.DataFrame, title: str) -> None:
-    """Grafica RSI."""
-    ax.clear()
-
-    if df is None or df.empty:
-        ax.text(0.5, 0.5, "Sin datos", ha="center", va="center", transform=ax.transAxes, fontsize=12)
-        ax.set_title(title, fontsize=10)
-        return
-
-    n = min(len(df), 60)
-    df = df.tail(n).reset_index(drop=True)
-
-    if "close" in df.columns:
-        close = df["close"].values
-        delta = np.diff(close)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-
-        window = 14
-        if len(close) >= window:
-            avg_gain = np.convolve(gain, np.ones(window)/window, mode="valid")
-            avg_loss = np.convolve(loss, np.ones(window)/window, mode="valid")
-            rs = avg_gain / (avg_loss + 1e-10)
-            rsi = 100 - (100 / (1 + rs))
-
-            ax.plot(rsi, color="#26a69a", linewidth=1.5, label="RSI(14)")
-            ax.axhline(y=70, color="red", linestyle="--", alpha=0.5, linewidth=0.8)
-            ax.axhline(y=30, color="green", linestyle="--", alpha=0.5, linewidth=0.8)
-            ax.fill_between(range(len(rsi)), 30, 70, alpha=0.1, color="gray")
-
-    ax.set_xlim(-1, n)
-    ax.set_ylim(0, 100)
-    ax.set_title(f"{title}", fontsize=10)
-    ax.set_ylabel("RSI", fontsize=10)
-    ax.legend(loc="upper right", fontsize=8)
-    ax.grid(True, alpha=0.3)
-
-
-def run_mock() -> None:
-    """Ejecuta en modo mock sin API."""
-    print("Ejecutando en MODO MOCK...")
-
-    df_1h = create_sample_data("1h", 60)
-    df_4h = create_sample_data("4h", 60)
-    df_1d = create_sample_data("1d", 60)
-
-    fig = plt.figure(figsize=(14, 10))
-    fig.suptitle("Replay Visualizer - Modo Mock (Test)", fontsize=14, fontweight="bold")
-
-    ax1 = fig.add_subplot(3, 1, 1)
-    plot_candlestick(ax1, df_1h, "1H", progress=1.0)
-
-    ax2 = fig.add_subplot(3, 1, 2)
-    plot_candlestick(ax2, df_4h, "4H", progress=0.5)
-
-    ax3 = fig.add_subplot(3, 1, 3)
-    plot_candlestick(ax3, df_1d, "1D", progress=0.25)
-
-    plt.tight_layout(rect=[0, 0, 1, 0.96])
-    plt.show()
-
-
-def run_with_api() -> None:
-    """Ejecuta con la API real."""
-    print("Iniciando visualización con API...")
-
-    start_replay()
-
-    fig = plt.figure(figsize=(14, 10))
-    fig.suptitle(f"Replay Visualizer - BTC/USDT", fontsize=14, fontweight="bold")
-
-    ax1h = fig.add_subplot(3, 1, 1)
-    ax4h = fig.add_subplot(3, 1, 2)
-    ax1d = fig.add_subplot(3, 1, 3)
-
-    plt.ion()
-    plt.show(block=False)
-
-    poll_thread = threading.Thread(target=poll_loop, daemon=True)
-    poll_thread.start()
-
-    try:
-        while _api_data["active"] and poll_thread.is_alive():
-            step = _api_data.get("step", 0)
-            progress_1h = (step % 100) / 100 if step < 100 else 1.0
-            progress_4h = (step % 4) / 4 if step < 100 else min((step % 4 + 1) / 4, 1.0)
-            progress_1d = (step % 24) / 24 if step < 100 else min((step % 24 + 1) / 24, 1.0)
-
-            plot_candlestick(ax1h, create_sample_data("1h", 60), "1H", progress_1h)
-            plot_candlestick(ax4h, create_sample_data("4h", 60), "4H", progress_4h)
-            plot_candlestick(ax1d, create_sample_data("1d", 60), "1D", progress_1d)
-
-            fig.tight_layout(rect=[0, 0, 1, 0.96])
-            plt.pause(0.5)
-
-    except KeyboardInterrupt:
-        print("\nDeteniendo...")
-    finally:
-        stop_replay()
-        plt.ioff()
-        print("Visualización terminada")
-
-
-def main() -> None:
-    """Main entry point."""
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Replay Visualizer")
-    parser.add_argument("--mock", action="store_true", help="Modo test sin API")
-    args = parser.parse_args()
-
-    if args.mock:
-        run_mock()
-        return
-
-    try:
-        run_with_api()
-    except Exception as e:
-        print(f"Error: {e}")
-    finally:
-        stop_replay()
-
-
-if __name__ == "__main__":
-    main()
-`````
 
 ## File: .env.example
 `````
@@ -443,25 +131,45 @@ Thumbs.db
 """
 Data endpoints — historical fetch and real-time latest candles.
 Covers RF-3 (historical) and RF-4 (real-time) exposure via API.
+
+Incluye opción de sincronización multi-timeframe:
+- sync_type: timeframe | merged | semantic
+- sync_version: ohlcv | indicators
 """
 
 from fastapi import APIRouter, HTTPException
 
 from app.api.schemas import HistoricalRequest
+from app.config import settings
 from app.core.data_ingestion.historical import HistoricalDataFetcher
 from app.core.data_ingestion.realtime import RealTimeDataFetcher
+from app.core.processing.indicators import IndicatorEngine
+from app.core.sync.multi_timeframe import MultiTimeframeSync
 
 router = APIRouter(prefix="/data", tags=["Data Ingestion"])
 
 _historical = HistoricalDataFetcher()
 _realtime = RealTimeDataFetcher()
+_sync = MultiTimeframeSync()
+
+
+def _apply_sync(data: dict, sync_type: str, sync_version: str):
+    """Aplicar sync a los datos."""
+    with_indicators = IndicatorEngine.compute_multi_timeframe(data)
+    synced = _sync.synchronize(with_indicators, sync_type=sync_type, sync_version=sync_version)
+    return synced
 
 
 @router.post("/historical")
 def fetch_historical(req: HistoricalRequest):
     """Fetch historical OHLCV data for the given parameters.
 
-    Returns a dict ``{timeframe: [{timestamp, open, high, low, close, volume}, …]}``.
+    Returns a dict with timeframe data, optionally synchronized.
+
+    Params:
+        - include_sync: If True, returns synchronized data (single DataFrame)
+        - sync_type: timeframe | merged | semantic (default from config)
+        - sync_version: ohlcv | indicators (default from config)
     """
     try:
         result = _historical.fetch_multi_timeframe(
@@ -470,16 +178,43 @@ def fetch_historical(req: HistoricalRequest):
             since=req.since,
             until=req.until,
         )
+
+        sync_type = req.sync_type or settings.sync_type
+        sync_version = req.sync_version or settings.sync_version
+
+        if req.include_sync:
+            synced = _apply_sync(result, sync_type, sync_version)
+            return synced.to_dict(orient="records")
+
         return {tf: df.to_dict(orient="records") for tf, df in result.items()}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
 
 @router.get("/realtime")
-def fetch_realtime(symbol: str = "BTC/USDT", limit: int = 30):
-    """Fetch the latest *limit* candles across all default timeframes."""
+def fetch_realtime(
+    symbol: str = "BTC/USDT",
+    limit: int = 30,
+    sync_type: str = None,
+    sync_version: str = None,
+    include_sync: bool = False,
+):
+    """Fetch the latest *limit* candles across all default timeframes.
+
+    Params:
+        - sync_type: timeframe | merged | semantic (default from config)
+        - sync_version: ohlcv | indicators (default from config)
+        - include_sync: If True, returns synchronized data
+    """
     try:
         result = _realtime.fetch_latest_multi_timeframe(symbol=symbol, limit=limit)
+
+        if include_sync:
+            use_sync_type = sync_type or settings.sync_type
+            use_sync_version = sync_version or settings.sync_version
+            synced = _apply_sync(result, use_sync_type, use_sync_version)
+            return synced.to_dict(orient="records")
+
         return {tf: df.to_dict(orient="records") for tf, df in result.items()}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
@@ -569,408 +304,6 @@ def describe_tensor(req: HistoricalRequest):
 def list_indicators():
     """List all available indicator labels."""
     return {"indicators": IndicatorEngine.available_indicators()}
-`````
-
-## File: app/api/schemas.py
-`````python
-"""
-Pydantic schemas for API request / response models.
-"""
-
-from pydantic import BaseModel, Field
-
-
-# ── Requests ────────────────────────────────────────
-
-
-class HistoricalRequest(BaseModel):
-    """Parameters for fetching historical OHLCV data."""
-    symbol: str = Field("BTC/USDT", description="Trading pair")
-    timeframes: list[str] = Field(["1h", "4h", "1d"], description="Candle intervals")
-    since: str | None = Field(None, description="Start date ISO-8601 (e.g. 2024-01-01T00:00:00Z)")
-    until: str | None = Field(None, description="End date ISO-8601")
-
-
-class ReplayRequest(BaseModel):
-    """Parameters for starting a market replay session."""
-    symbol: str = Field("BTC/USDT")
-    timeframes: list[str] = Field(["1h", "4h", "1d"])
-    since: str | None = Field(None)
-    until: str | None = Field(None)
-    speed_multiplier: float = Field(1.0, ge=0.1, le=100.0)
-
-
-# ── Responses ───────────────────────────────────────
-
-
-class TensorMeta(BaseModel):
-    """Metadata describing a generated tensor."""
-    window_size: int
-    num_features: int
-    num_rows: int
-    num_windows: int
-    tensor_shape: list[int]
-    feature_columns: list[str]
-
-
-class PipelineStatus(BaseModel):
-    """Current status of the data pipeline."""
-    mode: str  # "idle" | "historical" | "realtime" | "replay"
-    replay_active: bool
-    replay_step: int | None = None
-    replay_total_steps: int | None = None
-
-
-class HealthResponse(BaseModel):
-    """Health-check response."""
-    status: str = "ok"
-    version: str
-`````
-
-## File: app/core/data_ingestion/replay.py
-`````python
-"""
-RF-5: Market Replay — simulate real-time data from historical records.
-
-Uses Darts TimeSeries to create a sliding-window replay that respects
-temporal ordering and mimics the same refresh cadence as real-time mode.
-"""
-
-import asyncio
-from typing import AsyncGenerator
-
-import pandas as pd
-from darts import TimeSeries
-from loguru import logger
-
-from app.config import settings
-
-
-class MarketReplay:
-    """Replay historical OHLCV data as if it were arriving in real time.
-
-    Satisfies RF-5 acceptance criteria:
-    - Respects original temporal order.
-    - Simulates the configured refresh interval.
-    - Can be activated/deactivated via configuration or endpoint.
-    """
-
-    def __init__(
-        self,
-        data: dict[str, pd.DataFrame],
-        window_size: int | None = None,
-        speed_multiplier: float | None = None,
-        refresh_seconds: float | None = None,
-    ):
-        """
-        Args:
-            data: ``{timeframe: DataFrame}`` — historical data per timeframe.
-            window_size: Number of rows per sliding window (default from config).
-            speed_multiplier: Speed factor for replay (1.0 = real-time speed).
-            refresh_seconds: Base interval between emissions in seconds.
-        """
-        self._window_size = window_size or settings.tensor_window_size
-        self._speed = speed_multiplier or settings.replay_speed_multiplier
-        self._refresh = refresh_seconds or settings.replay_refresh_seconds
-        self._active = False
-
-        # Convert DataFrames → Darts TimeSeries for structured windowing
-        self._series: dict[str, TimeSeries] = {}
-        for tf, df in data.items():
-            ts_df = df.copy()
-            ts_df = ts_df.set_index("timestamp").sort_index()
-            # Darts requires a DatetimeIndex with a frequency
-            ts_df.index = pd.DatetimeIndex(ts_df.index)
-            self._series[tf] = TimeSeries.from_dataframe(
-                ts_df,
-                value_cols=["open", "high", "low", "close", "volume"],
-                fill_missing_dates=True,
-                freq=None,  # let Darts infer
-            )
-
-        # Determine max replay steps from the shortest series
-        min_len = min(len(s) for s in self._series.values())
-        self._max_steps = max(0, min_len - self._window_size)
-
-        logger.info(
-            "MarketReplay initialized — window={}, speed={}×, steps={}",
-            self._window_size,
-            self._speed,
-            self._max_steps,
-        )
-
-    # ── Public API ──────────────────────────────────
-
-    async def stream(self) -> AsyncGenerator[dict[str, pd.DataFrame], None]:
-        """Async generator that yields one window per step.
-
-        Yields:
-            ``{timeframe: DataFrame}`` — sliding window for each timeframe.
-        """
-        self._active = True
-        delay = self._refresh / self._speed
-
-        for step in range(self._max_steps):
-            if not self._active:
-                logger.info("Replay stopped at step {}/{}", step, self._max_steps)
-                return
-
-            window: dict[str, pd.DataFrame] = {}
-            for tf, ts in self._series.items():
-                sliced = ts[step : step + self._window_size]
-                window[tf] = sliced.pd_dataframe()
-
-            logger.debug("Replay step {}/{}", step + 1, self._max_steps)
-            yield window
-            await asyncio.sleep(delay)
-
-        self._active = False
-        logger.success("Replay completed — {} steps emitted", self._max_steps)
-
-    def stop(self) -> None:
-        """Stop the replay mid-stream."""
-        self._active = False
-
-    @property
-    def is_active(self) -> bool:
-        """Check if replay is currently running."""
-        return self._active
-
-    @property
-    def total_steps(self) -> int:
-        """Total number of replay steps available."""
-        return self._max_steps
-`````
-
-## File: app/core/processing/normalizer.py
-`````python
-"""
-RF-9: Data normalization strategies.
-
-Applies the appropriate normalization method depending on feature type:
-- Bounded indicators (RSI, Stochastic) → Min-Max [0, 1]
-- Prices and returns                   → Z-Score
-- Volumes                              → Log scaling + standardization
-"""
-
-import numpy as np
-import pandas as pd
-from loguru import logger
-
-
-class Normalizer:
-    """Apply column-aware normalization to a feature DataFrame.
-
-    Stores fitted parameters (mean, std, min, max) so the same transform
-    can be applied identically on future data (RNF-2 reproducibility).
-    """
-
-    # Columns containing these substrings use specific strategies.
-    _BOUNDED_KEYWORDS = {"Ind3", "Ind10"}  # RSI, Stochastic → Min-Max
-    _VOLUME_KEYWORDS = {"volume", "Ind9"}  # Volume, OBV → Log-scale
-    # Everything else → Z-Score
-
-    def __init__(self):
-        self._params: dict[str, dict] = {}  # {col: {method, ...fitted_values}}
-
-    # ── Public API ──────────────────────────────────
-
-    def fit_transform(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Fit on *df* and return the normalized copy.
-
-        Args:
-            df: DataFrame of numeric features (excludes ``timestamp``).
-
-        Returns:
-            Normalized DataFrame with the same shape and columns.
-        """
-        result = df.copy()
-        numeric_cols = result.select_dtypes(include=[np.number]).columns
-
-        for col in numeric_cols:
-            method = self._detect_method(col)
-            result[col] = self._apply(result[col], col, method, fit=True)
-
-        logger.debug("Fit & transformed {} numeric columns", len(numeric_cols))
-        return result
-
-    def transform(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Transform *df* using previously fitted parameters.
-
-        Args:
-            df: DataFrame with the same columns used in ``fit_transform``.
-
-        Returns:
-            Normalized DataFrame.
-        """
-        result = df.copy()
-        numeric_cols = result.select_dtypes(include=[np.number]).columns
-
-        for col in numeric_cols:
-            if col not in self._params:
-                logger.warning("Column {} was not fitted — skipping", col)
-                continue
-            method = self._params[col]["method"]
-            result[col] = self._apply(result[col], col, method, fit=False)
-
-        return result
-
-    # ── Internal ────────────────────────────────────
-
-    def _detect_method(self, col: str) -> str:
-        """Heuristic to select normalization method based on column name."""
-        for kw in self._BOUNDED_KEYWORDS:
-            if kw in col:
-                return "minmax"
-        for kw in self._VOLUME_KEYWORDS:
-            if kw.lower() in col.lower():
-                return "log"
-        return "zscore"
-
-    def _apply(self, series: pd.Series, col: str, method: str, fit: bool) -> pd.Series:
-        if method == "minmax":
-            return self._minmax(series, col, fit)
-        elif method == "log":
-            return self._log_scale(series, col, fit)
-        else:
-            return self._zscore(series, col, fit)
-
-    def _minmax(self, s: pd.Series, col: str, fit: bool) -> pd.Series:
-        if fit:
-            mn, mx = s.min(), s.max()
-            self._params[col] = {"method": "minmax", "min": mn, "max": mx}
-        else:
-            mn = self._params[col]["min"]
-            mx = self._params[col]["max"]
-        rng = mx - mn
-        if rng == 0:
-            return pd.Series(0.0, index=s.index)
-        return (s - mn) / rng
-
-    def _zscore(self, s: pd.Series, col: str, fit: bool) -> pd.Series:
-        if fit:
-            mean, std = s.mean(), s.std()
-            self._params[col] = {"method": "zscore", "mean": mean, "std": std}
-        else:
-            mean = self._params[col]["mean"]
-            std = self._params[col]["std"]
-        if std == 0:
-            return pd.Series(0.0, index=s.index)
-        return (s - mean) / std
-
-    def _log_scale(self, s: pd.Series, col: str, fit: bool) -> pd.Series:
-        logged = np.log1p(s.clip(lower=0))
-        if fit:
-            mean, std = logged.mean(), logged.std()
-            self._params[col] = {"method": "log", "mean": mean, "std": std}
-        else:
-            mean = self._params[col]["mean"]
-            std = self._params[col]["std"]
-        if std == 0:
-            return pd.Series(0.0, index=s.index)
-        return (logged - mean) / std
-
-    @property
-    def fitted_params(self) -> dict[str, dict]:
-        """Return a copy of the fitted normalization parameters."""
-        return dict(self._params)
-`````
-
-## File: app/core/sync/multi_timeframe.py
-`````python
-"""
-RF-7: Multi-timeframe synchronization.
-
-Aligns 1h, 4h, and daily candle data into a single coherent row
-so that every row of the tensor represents the same market instant.
-"""
-
-import pandas as pd
-from loguru import logger
-
-
-class MultiTimeframeSync:
-    """Synchronize OHLCV DataFrames from different timeframes into one aligned table.
-
-    Alignment rules (RF-7):
-    - 4 candles of 1h  ≡ 1 candle of 4h.
-    - 24 candles of 1h ≡ 1 candle of 1d.
-    - Each row represents the *same* market instant.
-
-    Strategy: use the 1h timeframe as the master clock and forward-fill
-    the higher timeframes so each 1h row carries the most recent 4h/1d values.
-    """
-
-    # Mapping from standard config labels to canonical names
-    _TF_CANONICAL = {"1h": "1h", "4h": "4h", "1d": "1d", "1D": "1d"}
-
-    def __init__(self, base_timeframe: str = "1h"):
-        self._base = base_timeframe
-
-    # ── Public API ──────────────────────────────────
-
-    def synchronize(self, data: dict[str, pd.DataFrame]) -> pd.DataFrame:
-        """Merge multiple timeframes into a single aligned DataFrame.
-        
-        Only adds timeframe suffix to OHLCV columns (open, high, low, close, volume, progress_vela).
-        Indicator columns (already with suffix like RSI_1h, EMA_50_4h) are kept as-is.
-        """
-        if self._base not in data:
-            raise ValueError(f"Base timeframe '{self._base}' not found in data keys: {list(data.keys())}")
-
-        base_df = data[self._base].copy()
-        base_df = base_df.set_index("timestamp").sort_index()
-
-        ohlcv_cols = {"open", "high", "low", "close", "volume", "progress_vela"}
-        
-        for col in list(base_df.columns):
-            if col in ohlcv_cols and not col.endswith(f"_{self._base}"):
-                base_df.rename(columns={col: f"{col}_{self._base}"}, inplace=True)
-
-        for tf, df in data.items():
-            canonical = self._TF_CANONICAL.get(tf, tf)
-            if canonical == self._base:
-                continue
-
-            higher = df.copy()
-            higher = higher.set_index("timestamp").sort_index()
-            
-            for col in list(higher.columns):
-                if col in ohlcv_cols and not col.endswith(f"_{canonical}"):
-                    higher.rename(columns={col: f"{col}_{canonical}"}, inplace=True)
-
-            higher = higher.reindex(base_df.index, method="ffill")
-            base_df = base_df.join(higher, how="left")
-
-        base_df = base_df.ffill()
-
-        logger.info(
-            "Synchronized {} timeframes → {} rows × {} cols",
-            len(data),
-            len(base_df),
-            len(base_df.columns),
-        )
-        return base_df
-
-    @staticmethod
-    def add_global_features(df: pd.DataFrame) -> pd.DataFrame:
-        """Append global features required by RF-11.
-
-        Adds:
-        - ``precio_actual``: latest close from the 1h column.
-        - ``tiempo_normalizado``: hour-of-day / 24, capturing intraday position.
-        """
-        result = df.copy()
-
-        # Current price = most recent 1h close at that row
-        close_1h_col = [c for c in result.columns if c.startswith("close") and "1h" in c]
-        if close_1h_col:
-            result["precio_actual"] = result[close_1h_col[0]]
-
-        # Normalized time (hour / 24)
-        result["tiempo_normalizado"] = result.index.hour / 24.0
-
-        return result
 `````
 
 ## File: repomix-output.xml
@@ -4492,6 +3825,14 @@ pip install -r requirements.txt
 </files>
 `````
 
+## File: run_visualizer.bat
+`````batch
+@echo off
+cd /d C:\Users\PILON\Desktop\Proyectos\IA-APP
+python tests\test_replay_visualizer.py --mock
+pause
+`````
+
 ## File: run.py
 `````python
 """
@@ -4600,6 +3941,309 @@ class TestNormalizer:
         assert params["Ind3_1h"]["method"] == "minmax"
 `````
 
+## File: tests/test_replay_visualizer.py
+`````python
+"""
+Replay Visualizer - Muestra el replay en vivo con matplotlib.
+
+Usage:
+    python tests/test_replay_visualizer.py --mock    # Testing sin API
+    python tests/test_replay_visualizer.py       # Con API real
+
+Abre ventana con 3 subplots (1h, 4h, 1d) mostrando:
+- Velas OHLCV
+- Indicadores (RSI, MACD, EMA, Bollinger)  
+- Progress de la vela
+"""
+
+import time
+import threading
+import requests
+import pandas as pd
+import numpy as np
+import matplotlib
+matplotlib.use('TkAgg')
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+from datetime import datetime
+from typing import Dict, Any, Optional
+
+API_BASE = "http://localhost:8000"
+
+PAYLOAD = {
+    "symbol": "BTC/USDT",
+    "since": "2026-02-01T00:00:00",
+    "until": "2026-05-05T09:00:00",
+    "speed_multiplier": 10,
+}
+
+_api_data: Dict[str, Any] = {
+    "active": False,
+    "step": 0,
+    "total": 0,
+    "candles_1h": None,
+    "candles_4h": None,
+    "candles_1d": None,
+    "progress": {"1h": 1.0, "4h": 0.5, "1d": 0.25},
+}
+_stop_event = threading.Event()
+
+
+def start_replay() -> Dict:
+    """Inicia el replay."""
+    print(f"Iniciando replay: {PAYLOAD}")
+    resp = requests.post(f"{API_BASE}/replay/start", json=PAYLOAD, timeout=120)
+    resp.raise_for_status()
+    data = resp.json()
+    print(f"Replay iniciado: total_steps={data.get('total_steps')}, window={data.get('window_size')}")
+    _api_data["total"] = data.get("total_steps", 0)
+    _api_data["active"] = True
+    return data
+
+
+def stop_replay() -> None:
+    """Detiene el replay."""
+    try:
+        requests.post(f"{API_BASE}/replay/stop", timeout=10)
+    except:
+        pass
+    _api_data["active"] = False
+
+
+def poll_loop() -> None:
+    """Hace polling de los datos del replay."""
+    while not _stop_event.is_set():
+        try:
+            status_resp = requests.get(f"{API_BASE}/replay/status", timeout=10)
+            status = status_resp.json()
+
+            if not status.get("replay_active"):
+                print("Replay terminado")
+                break
+
+            step = status.get("replay_step", 0)
+            _api_data["step"] = step
+
+            print(f"Step {step}/{_api_data['total']}")
+
+            if step % 10 == 0:
+                time.sleep(0.5)
+            else:
+                time.sleep(0.1)
+
+        except Exception as e:
+            print(f"Error polling: {e}")
+            time.sleep(0.5)
+
+    _api_data["active"] = False
+
+
+def create_sample_data(tf: str, n: int = 60) -> pd.DataFrame:
+    """Crea datos de ejemplo para testing."""
+    np.random.seed(42)
+
+    start_date = datetime(2026, 2, 1)
+    freq_map = {"1h": "h", "4h": "4h", "1d": "D"}
+    dates = pd.date_range(start=start_date, periods=n, freq=freq_map.get(tf, "h"))
+
+    base_price = 67000
+    returns = np.random.randn(n) * 0.02
+    prices = base_price * np.exp(np.cumsum(returns))
+
+    data = []
+    for i, (date, close) in enumerate(zip(dates, prices)):
+        open_price = close * (1 + np.random.uniform(-0.005, 0.005))
+        high = max(open_price, close) * (1 + abs(np.random.uniform(0, 0.01)))
+        low = min(open_price, close) * (1 - abs(np.random.uniform(0, 0.01)))
+        volume = np.random.randint(500, 2000)
+
+        data.append({
+            "timestamp": date,
+            "open": open_price,
+            "high": high,
+            "low": low,
+            "close": close,
+            "volume": volume,
+        })
+
+    return pd.DataFrame(data)
+
+
+def plot_candlestick(ax: plt.Axes, df: pd.DataFrame, title: str, progress: float = 1.0) -> None:
+    """Grafica velas japonesas."""
+    ax.clear()
+
+    if df is None or df.empty:
+        ax.text(0.5, 0.5, "Sin datos", ha="center", va="center", transform=ax.transAxes, fontsize=14)
+        ax.set_title(title, fontsize=12)
+        return
+
+    n = min(len(df), 60)
+    df = df.tail(n).reset_index(drop=True)
+
+    for i in range(n):
+        row = df.iloc[i]
+        o, h, l, c = row["open"], row["high"], row["low"], row["close"]
+        color = "#26a69a" if c >= o else "#ef5350"
+
+        ax.plot([i, i], [l, h], color=color, linewidth=0.8)
+
+        body_bottom = min(o, c)
+        body_height = abs(c - o)
+        if body_height < 0.1:
+            body_height = max(h - l) * 0.3
+
+        ax.add_patch(plt.Rectangle(
+            (i - 0.35, body_bottom),
+            0.7,
+            body_height,
+            facecolor=color,
+            edgecolor=color,
+            linewidth=0.5,
+        ))
+
+    ax.set_xlim(-1, n)
+    y_min, y_max = df["low"].min() * 0.995, df["high"].max() * 1.005
+    ax.set_ylim(y_min, y_max)
+
+    step = _api_data.get("step", 0)
+    total = _api_data.get("total", 0)
+    ax.set_title(f"{title} | Step: {step}/{total} | Progress: {progress:.0%}", fontsize=12, fontweight="bold")
+    ax.set_ylabel("Price", fontsize=10)
+    ax.grid(True, alpha=0.3)
+
+    ylabel = ax.set_yticks([])
+    for label in ax.get_yticklabels():
+        label.set_fontsize(8)
+
+
+def plot_indicators(ax: plt.Axes, df: pd.DataFrame, title: str) -> None:
+    """Grafica RSI."""
+    ax.clear()
+
+    if df is None or df.empty:
+        ax.text(0.5, 0.5, "Sin datos", ha="center", va="center", transform=ax.transAxes, fontsize=12)
+        ax.set_title(title, fontsize=10)
+        return
+
+    n = min(len(df), 60)
+    df = df.tail(n).reset_index(drop=True)
+
+    if "close" in df.columns:
+        close = df["close"].values
+        delta = np.diff(close)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+
+        window = 14
+        if len(close) >= window:
+            avg_gain = np.convolve(gain, np.ones(window)/window, mode="valid")
+            avg_loss = np.convolve(loss, np.ones(window)/window, mode="valid")
+            rs = avg_gain / (avg_loss + 1e-10)
+            rsi = 100 - (100 / (1 + rs))
+
+            ax.plot(rsi, color="#26a69a", linewidth=1.5, label="RSI(14)")
+            ax.axhline(y=70, color="red", linestyle="--", alpha=0.5, linewidth=0.8)
+            ax.axhline(y=30, color="green", linestyle="--", alpha=0.5, linewidth=0.8)
+            ax.fill_between(range(len(rsi)), 30, 70, alpha=0.1, color="gray")
+
+    ax.set_xlim(-1, n)
+    ax.set_ylim(0, 100)
+    ax.set_title(f"{title}", fontsize=10)
+    ax.set_ylabel("RSI", fontsize=10)
+    ax.legend(loc="upper right", fontsize=8)
+    ax.grid(True, alpha=0.3)
+
+
+def run_mock() -> None:
+    """Ejecuta en modo mock sin API."""
+    print("Ejecutando en MODO MOCK...")
+
+    df_1h = create_sample_data("1h", 60)
+    df_4h = create_sample_data("4h", 60)
+    df_1d = create_sample_data("1d", 60)
+
+    fig = plt.figure(figsize=(14, 10))
+    fig.suptitle("Replay Visualizer - Modo Mock (Test)", fontsize=14, fontweight="bold")
+
+    ax1 = fig.add_subplot(3, 1, 1)
+    plot_candlestick(ax1, df_1h, "1H", progress=1.0)
+
+    ax2 = fig.add_subplot(3, 1, 2)
+    plot_candlestick(ax2, df_4h, "4H", progress=0.5)
+
+    ax3 = fig.add_subplot(3, 1, 3)
+    plot_candlestick(ax3, df_1d, "1D", progress=0.25)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
+    plt.show()
+
+
+def run_with_api() -> None:
+    """Ejecuta con la API real."""
+    print("Iniciando visualización con API...")
+
+    start_replay()
+
+    fig = plt.figure(figsize=(14, 10))
+    fig.suptitle(f"Replay Visualizer - BTC/USDT", fontsize=14, fontweight="bold")
+
+    ax1h = fig.add_subplot(3, 1, 1)
+    ax4h = fig.add_subplot(3, 1, 2)
+    ax1d = fig.add_subplot(3, 1, 3)
+
+    plt.ion()
+    plt.show(block=False)
+
+    poll_thread = threading.Thread(target=poll_loop, daemon=True)
+    poll_thread.start()
+
+    try:
+        while _api_data["active"] and poll_thread.is_alive():
+            step = _api_data.get("step", 0)
+            progress_1h = (step % 100) / 100 if step < 100 else 1.0
+            progress_4h = (step % 4) / 4 if step < 100 else min((step % 4 + 1) / 4, 1.0)
+            progress_1d = (step % 24) / 24 if step < 100 else min((step % 24 + 1) / 24, 1.0)
+
+            plot_candlestick(ax1h, create_sample_data("1h", 60), "1H", progress_1h)
+            plot_candlestick(ax4h, create_sample_data("4h", 60), "4H", progress_4h)
+            plot_candlestick(ax1d, create_sample_data("1d", 60), "1D", progress_1d)
+
+            fig.tight_layout(rect=[0, 0, 1, 0.96])
+            plt.pause(0.5)
+
+    except KeyboardInterrupt:
+        print("\nDeteniendo...")
+    finally:
+        stop_replay()
+        plt.ioff()
+        print("Visualización terminada")
+
+
+def main() -> None:
+    """Main entry point."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Replay Visualizer")
+    parser.add_argument("--mock", action="store_true", help="Modo test sin API")
+    args = parser.parse_args()
+
+    if args.mock:
+        run_mock()
+        return
+
+    try:
+        run_with_api()
+    except Exception as e:
+        print(f"Error: {e}")
+    finally:
+        stop_replay()
+
+
+if __name__ == "__main__":
+    main()
+`````
+
 ## File: tests/test_tensor_builder.py
 `````python
 """
@@ -4662,56 +4306,65 @@ class TestTensorBuilder:
         assert meta["tensor_shape"] == [21, 30, 10]
 `````
 
-## File: app/config.py
+## File: app/api/schemas.py
 `````python
 """
-Centralized application configuration.
-Loads settings from .env file and environment variables.
-Covers RF-1 (environment isolation) requirements.
+Pydantic schemas for API request / response models.
 """
 
-__version__ = "0.1.0"
-
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import BaseModel, Field
 
 
-class Settings(BaseSettings):
-    """Application-wide settings loaded from .env / environment."""
-
-    model_config = SettingsConfigDict(
-        env_file=".env",
-        env_file_encoding="utf-8",
-        case_sensitive=False,
-    )
-
-    # ── Server ──────────────────────────────────────
-    app_host: str = "0.0.0.0"
-    app_port: int = 8000
-    app_debug: bool = True
-
-    # ── Exchange ────────────────────────────────────
-    exchange_id: str = "binance"
-    exchange_rate_limit: bool = True
-
-    # ── Data ────────────────────────────────────────
-    default_symbol: str = "BTC/USDT"
-    default_timeframes: str = "1h,4h,1d"
-
-    # ── Tensor ──────────────────────────────────────
-    tensor_window_size: int = 100
-    historical_buffer_hours: int = 1440  # 60 días de 1h = ~2 meses
-
-    # ── Replay ──────────────────────────────────────
-    replay_speed_multiplier: float = 1.0
-    replay_refresh_seconds: float = 5.0
-
-    @property
-    def timeframes_list(self) -> list[str]:
-        """Return timeframes as a clean list."""
-        return [tf.strip() for tf in self.default_timeframes.split(",")]
+# ── Requests ────────────────────────────────────────
 
 
-settings = Settings()
+class HistoricalRequest(BaseModel):
+    """Parameters for fetching historical OHLCV data."""
+    symbol: str = Field("BTC/USDT", description="Trading pair")
+    timeframes: list[str] = Field(["1h", "4h", "1d"], description="Candle intervals")
+    since: str | None = Field(None, description="Start date ISO-8601 (e.g. 2024-01-01T00:00:00Z)")
+    until: str | None = Field(None, description="End date ISO-8601")
+    sync_type: str | None = Field(None, description="timeframe | merged | semantic (default from config)")
+    sync_version: str | None = Field(None, description="ohlcv | indicators (default from config)")
+    include_sync: bool = Field(False, description="Apply sync to the data")
+
+
+class ReplayRequest(BaseModel):
+    """Parameters for starting a market replay session."""
+    symbol: str = Field("BTC/USDT")
+    timeframes: list[str] = Field(["1h", "4h", "1d"])
+    since: str | None = Field(None)
+    until: str | None = Field(None)
+    speed_multiplier: float = Field(1.0, ge=0.1, le=100.0)
+    sync_type: str | None = Field(None, description="timeframe | merged | semantic (default from config)")
+    sync_version: str | None = Field(None, description="ohlcv | indicators (default from config)")
+
+
+# ── Responses ───────────────────────────────────────
+
+
+class TensorMeta(BaseModel):
+    """Metadata describing a generated tensor."""
+    window_size: int
+    num_features: int
+    num_rows: int
+    num_windows: int
+    tensor_shape: list[int]
+    feature_columns: list[str]
+
+
+class PipelineStatus(BaseModel):
+    """Current status of the data pipeline."""
+    mode: str  # "idle" | "historical" | "realtime" | "replay"
+    replay_active: bool
+    replay_step: int | None = None
+    replay_total_steps: int | None = None
+
+
+class HealthResponse(BaseModel):
+    """Health-check response."""
+    status: str = "ok"
+    version: str
 `````
 
 ## File: app/core/data_ingestion/historical.py
@@ -5098,60 +4751,436 @@ class RealTimeDataFetcher:
         return self._latest
 `````
 
+## File: app/core/processing/normalizer.py
+`````python
+
+`````
+
+## File: app/core/sync/multi_timeframe.py
+`````python
+"""
+RF-7: Multi-timeframe synchronization.
+
+Múltiples modos de sincronización:
+- TYPE 1 (timeframe): 1h|indicadores|4h|indicadores|1d|indicadores
+- TYPE 2 (merged): todos los indicadores juntos sin separación por timeframe
+- TYPE 3 (semantic): por grupos (VELOCIDAD|1h,4h,1d|TENDENCIA|...)
+
+Cada tipo tiene 2 versiones:
+- ohlcv: incluye OHLCV, volume, progress
+- indicators: solo indicadores
+
+Bug fix: sincronización correcta sin reindex/ffill problemático.
+"""
+
+import pandas as pd
+from loguru import logger
+
+from app.config import settings
+
+
+class MultiTimeframeSync:
+    """Synchronize OHLCV DataFrames con múltiples modos y versiones."""
+
+    _TF_CANONICAL = {"1h": "1h", "4h": "4h", "1d": "1d", "1D": "1d"}
+
+    OHLCV_COLS = ["open", "high", "low", "close", "volume", "progress_vela"]
+
+    GROUPS = {
+        "VELOCIDAD": ["MON", "ROC", "RSI_6", "RSI_14", "RSI_24", "RSI_EMA_6", "RSI_EMA_14",
+                     "RSI_EMA_24", "STOCH_K", "STOCH_D", "WILLIAMS_R", "CCI"],
+        "TENDENCIA": ["MACD_LINE", "MACD_SIGNAL", "MACD_HIST", "ADX", "DI_PLUS", "DI_MINUS",
+                     "EMA_22", "EMA_50", "EMA_100", "ICHIMOKU_TENKAN", "ICHIMOKU_KIJUN",
+                     "ICHIMOKU_SA", "ICHIMOKU_SB", "ICHIMOKU_CHIKOU"],
+        "AMPLITUD": ["BB_UPPER", "BB_MIDDLE", "BB_LOWER", "BB_WIDTH",
+                     "KELTNER_UPPER", "KELTNER_MIDDLE", "KELTNER_LOWER"],
+        "LIQUIDEZ": ["CMF", "OBV", "ELDER_BULL", "ELDER_BEAR", "EOM", "VWAP"],
+    }
+
+    def __init__(self, base_timeframe: str = "1h"):
+        self._base = base_timeframe
+
+    def synchronize(self, data: dict[str, pd.DataFrame], sync_type: str = None,
+                    sync_version: str = None, include_global: bool = True) -> pd.DataFrame:
+        """Main synchronization method.
+
+        Args:
+            data: dict with timeframe keys and DataFrame values
+            sync_type: "timeframe" | "merged" | "semantic" (default from config)
+            sync_version: "ohlcv" | "indicators" (default from config)
+            include_global: add global features (precio_actual, tiempo_normalizado)
+        """
+        sync_type = sync_type or settings.sync_type
+        sync_version = sync_version or settings.sync_version
+
+        if self._base not in data:
+            raise ValueError(f"Base timeframe '{self._base}' not found: {list(data.keys())}")
+
+        base_df = data[self._base].copy()
+        base_df = base_df.set_index("timestamp").sort_index()
+
+        for tf, df in data.items():
+            canonical = self._TF_CANONICAL.get(tf, tf)
+            if canonical != self._base:
+                df_copy = df.copy().set_index("timestamp").sort_index()
+                # Agregar sufijo a las columnas OHLCV para evitar overlap
+                for col in self.OHLCV_COLS:
+                    if col in df_copy.columns:
+                        df_copy = df_copy.rename(columns={col: f"{col}_{canonical}"})
+                df_copy = df_copy.reindex(base_df.index, method="ffill")
+                base_df = base_df.join(df_copy, how="left")
+
+        base_df = base_df.ffill()
+
+        result = base_df.copy()
+
+        if sync_type == "timeframe":
+            result = self._sync_timeframe(result, sync_version)
+        elif sync_type == "merged":
+            result = self._sync_merged(result, sync_version)
+        elif sync_type == "semantic":
+            result = self._sync_semantic(result, sync_version)
+        else:
+            raise ValueError(f"Unknown sync_type: {sync_type}")
+
+        if include_global:
+            result = self.add_global_features(result)
+
+        return result
+
+    def _sync_timeframe(self, df: pd.DataFrame, version: str) -> pd.DataFrame:
+        """Tipo 1: Cada timeframe con sus indicadores juntos."""
+        result = pd.DataFrame(index=df.index)
+
+        for tf in ["1h", "4h", "1d"]:
+            tf_cols = [c for c in df.columns if f"_{tf}" in c]
+            if not tf_cols:
+                continue
+
+            ohlcv_tf = [c for c in tf_cols if any(c.endswith(f"_{tf}") and c.replace(f"_{tf}", "") in self.OHLCV_COLS)]
+            indicators_tf = [c for c in tf_cols if c not in ohlcv_tf]
+
+            if version == "ohlcv":
+                for col in ohlcv_tf:
+                    result[col] = df[col]
+            elif version == "indicators":
+                pass
+
+            for col in indicators_tf:
+                result[col] = df[col]
+
+        for col in df.columns:
+            if not any(f"_{tf}" in col for tf in ["1h", "4h", "1d"]):
+                result[col] = df[col]
+
+        return result
+
+    def _sync_merged(self, df: pd.DataFrame, version: str) -> pd.DataFrame:
+        """Tipo 2: Todos los indicadores juntos sin separación por timeframe."""
+        result = pd.DataFrame(index=df.index)
+
+        if version == "ohlcv":
+            for tf in ["1h", "4h", "1d"]:
+                ohlcv_cols = [c for c in df.columns if f"_{tf}" in c and any(c.replace(f"_{tf}", "") in self.OHLCV_COLS for _ in [1])]
+                for col in ohlcv_cols:
+                    result[col] = df[col]
+
+        all_indicators = []
+        for tf in ["1h", "4h", "1d"]:
+            tf_indicators = [c for c in df.columns if f"_{tf}" in c and not any(c.replace(f"_{tf}", "") in self.OHLCV_COLS)]
+            all_indicators.extend(tf_indicators)
+
+        for col in all_indicators:
+            indicator_name = col.rsplit("_", 1)[0]
+            for tf in ["1h", "4h", "1d"]:
+                full_col = f"{indicator_name}_{tf}"
+                if full_col in df.columns:
+                    result[full_col] = df[full_col]
+
+        for col in df.columns:
+            if col not in result.columns:
+                result[col] = df[col]
+
+        return result
+
+    def _sync_semantic(self, df: pd.DataFrame, version: str) -> pd.DataFrame:
+        """Tipo 3: Por grupos semánticos (VELOCIDAD, TENDENCIA, AMPLITUD, LIQUIDEZ)."""
+        result = pd.DataFrame(index=df.index)
+
+        if version == "ohlcv":
+            for tf in ["1h", "4h", "1d"]:
+                ohlcv_cols = [c for c in df.columns if f"_{tf}" in c and any(c.replace(f"_{tf}", "") in self.OHLCV_COLS)]
+                for col in ohlcv_cols:
+                    result[col] = df[col]
+
+        for group_name, indicators in self.GROUPS.items():
+            group_cols = []
+            for indicator in indicators:
+                for tf in ["1h", "4h", "1d"]:
+                    full_col = f"{indicator}_{tf}"
+                    if full_col in df.columns:
+                        group_cols.append(full_col)
+
+            for col in group_cols:
+                result[col] = df[col]
+
+        for col in df.columns:
+            if col not in result.columns:
+                result[col] = df[col]
+
+        return result
+
+    @staticmethod
+    def add_global_features(df: pd.DataFrame) -> pd.DataFrame:
+        """Agregar features globales."""
+        result = df.copy()
+
+        close_1h_col = [c for c in result.columns if c.startswith("close") and "1h" in c]
+        if close_1h_col:
+            result["precio_actual"] = result[close_1h_col[0]]
+
+        if "tiempo_normalizado" not in result.columns:
+            result["tiempo_normalizado"] = result.index.hour / 24.0
+
+        return result
+
+    @staticmethod
+    def get_sync_types() -> list[str]:
+        """Retorna los tipos de sync disponibles."""
+        return ["timeframe", "merged", "semantic"]
+
+    @staticmethod
+    def get_versions() -> list[str]:
+        """Retorna las versiones disponibles."""
+        return ["ohlcv", "indicators"]
+`````
+
+## File: app/utils/logger.py
+`````python
+"""
+Centralized logging configuration using Loguru.
+
+Provides structured, colored console output and optional file rotation.
+Satisfies RNF-4 (Observability).
+"""
+
+import sys
+
+from loguru import logger
+
+from app.config import settings
+
+
+def setup_logging() -> None:
+    """Configure Loguru for the application."""
+    # Remove default handler
+    logger.remove()
+
+    # Console handler — colorized, with context
+    log_level = "DEBUG" if settings.app_debug else "INFO"
+    logger.add(
+        sys.stderr,
+        level=log_level,
+        format=(
+            "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | "
+            "<level>{level: <8}</level> | "
+            "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> — "
+            "<level>{message}</level>"
+        ),
+        colorize=True,
+    )
+
+    # File handler — rotated daily, kept 7 days
+    logger.add(
+        "logs/ia_app_{time:YYYY-MM-DD}.log",
+        rotation="1 day",
+        retention="7 days",
+        level="DEBUG",
+        format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} — {message}",
+    )
+
+    logger.info("Logging initialized — level={}", log_level)
+`````
+
+## File: README.md
+`````markdown
+# IA-APP: Estrategia de Inversión Cuantitativa
+
+Este proyecto implementa una **Inteligencia Artificial** especializada en mercados financieros, diseñada para generar señales de compra y venta con objetivos de rentabilidad superiores al 10%. El sistema integra técnicas avanzadas de Deep Learning con metodologías cuantitativas de vanguardia.
+
+## Características Principales
+
+- **Deep Reinforcement Learning (DRL):** El agente aprende directamente de los resultados financieros, optimizando la estrategia en entornos simulados antes de operar en real.
+- **Arquitectura Multimodal (xLSTM):** Integra información de precios, volumen, indicadores técnicos y sentimiento de mercado para tomar decisiones holísticas.
+- **Gestión de Riesgo Avanzada:** Implementa el **Triple Barrier Method** y **Differentiable Sharpe Ratio** para asegurar ratios riesgo/beneficio favorables (objetivo 1:4) y evitar el _overfitting_.
+- **Estructura Modular (RF-1 a RF-11):** El código sigue una arquitectura estricta que separa la recolección de datos, cálculo de indicadores, construcción de tensores y lógica de inferencia.
+
+## Arquitectura Técnica
+
+El sistema está organizado en los siguientes módulos principales:
+
+1.  **Data Fetcher:** Obtiene datos históricos de múltiples temporalidades (1h, 4h, 1d) desde fuentes fiables (Binance, CCXT).
+2.  **Indicator Engine:** Calcula indicadores técnicos (SMA, EMA, MACD, Bollinger Bands, etc.) utilizando la librería `ta`.
+3.  **Tensor Builder:** Estructura los datos en tensores 3D para el entrenamiento de redes neuronales, preservando el orden temporal.
+4.  **Model Architecture:** Implementación de redes basadas en **Transformers** y **LSTM** adaptadas a datos financieros (xLSTM, PatchTST).
+5.  **Risk Manager:** Define las condiciones de salida y profit (10%) y stop-loss (2%) para guiar el entrenamiento.
+
+## Instalación y Ejecución
+
+### Requisitos
+
+- Python 3.9+
+- CUDA (para entrenamiento GPU)
+
+### Instalación de Dependencias
+
+```bash
+git clone https://github.com/tuusuario/IA-APP.git
+cd IA-APP
+pip install -r requirements.txt
+```
+
+### Ejecución
+
+- **Entrenamiento:**
+  ```bash
+  python train.py --symbol BTC/USDT --epochs 50 --window-size 30
+  ```
+- **Inferencia (Modo Replay):**
+  ```bash
+  python main.py --mode replay --symbol BTC/USDT --speed 2.0
+  ```
+
+## 📊 Estrategia de Mercado
+
+- **Símbolo:** BTC/USDT
+- **Objetivo de Profit:** +10% por operación.
+- **Stop Loss:** -2%.
+- **Horizonte:** Corto / Medio plazo.
+- **Temporalidades:** 1h, 4h, 1d (sincronizadas).
+`````
+
+## File: requirements.txt
+`````
+# ── Server ──────────────────────────────────────────
+fastapi>=0.115.0
+uvicorn[standard]>=0.34.0
+pydantic>=2.11.0
+pydantic-settings>=2.9.0
+python-dotenv>=1.0.0
+
+# ── Data Ingestion ──────────────────────────────────
+ccxt>=4.5.0
+
+# ── Data Processing & Analysis ──────────────────────
+pandas>=2.2.0
+numpy>=2.1.0
+ta>=0.11.0
+
+# ── Time-Series & Replay ───────────────────────────
+darts>=0.32.0
+backtrader>=1.9.78.123
+
+# ── Tensor / Deep Learning Backend ──────────────────
+torch>=2.6.0
+
+# ── Observability & Logging ─────────────────────────
+loguru>=0.7.0
+
+# ── Testing ─────────────────────────────────────────
+pytest>=8.0.0
+httpx>=0.28.0
+`````
+
+## File: app/config.py
+`````python
+"""
+Centralized application configuration.
+Loads settings from .env file and environment variables.
+Covers RF-1 (environment isolation) requirements.
+"""
+
+__version__ = "0.1.0"
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    """Application-wide settings loaded from .env / environment."""
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+    )
+
+    # ── Server ──────────────────────────────────────
+    app_host: str = "0.0.0.0"
+    app_port: int = 8000
+    app_debug: bool = True
+
+    # ── Exchange ────────────────────────────────────
+    exchange_id: str = "binance"
+    exchange_rate_limit: bool = True
+
+    # ── Data ────────────────────────────────────────
+    default_symbol: str = "BTC/USDT"
+    default_timeframes: str = "1h,4h,1d"
+
+    # ── Tensor ──────────────────────────────────────
+    tensor_window_size: int = 100
+
+    # ── Replay ──────────────────────────────────────
+    replay_speed_multiplier: float = 1.0
+    replay_refresh_seconds: float = 5.0
+    replay_indicators_warmup: int = 2400  # ~100 días de 1h para indicadores completos
+
+    # ── Sync ──────────────────────────────────────────
+    # Tipos: "timeframe" | "merged" | "semantic"
+    sync_type: str = "timeframe"
+    # Versión: "ohlcv" | "indicators"
+    sync_version: str = "indicators"
+
+    @property
+    def timeframes_list(self) -> list[str]:
+        """Return timeframes as a clean list."""
+        return [tf.strip() for tf in self.default_timeframes.split(",")]
+
+
+settings = Settings()
+`````
+
 ## File: app/core/data_ingestion/replay_backtrader.py
 `````python
 """
 RF-5: Backtrader Data Replay - Reconstruct higher timeframes from 1h data.
 
-Uses backtrader's replay feature to simulate how 4h and 1d candles develop
-from 1h input data, providing more realistic backtesting than pre-built candles.
+LOGICA DEL REPLAY:
+1. Fetch 1h del rango completo (ej: 2026-01-01 a 2026-05-01)
+2. Warmup: primeros 2400 datos (~100 días) para indicadores completos
+3. Por cada step posterior:
+   - Agregar 1 vela 1h al buffer
+   - Acumular datos en vela 4h (cerrar cada 4 steps)
+   - Acumular datos en vela 1d (cerrar cada 24 steps)
+4. Retornar buffers con TODOS los datos acumulados + vela en progreso
+5. Los indicadores usan todos los datos del buffer
 """
 
 import asyncio
 from datetime import datetime
 from typing import AsyncGenerator
 
-import backtrader as bt
 import pandas as pd
 from loguru import logger
 
-
-class PandasDataFrameFeed(bt.feeds.PandasData):
-    """Custom data feed that accepts a DataFrame directly."""
-
-    params = (
-        ("datetime", None),
-        ("open", "open"),
-        ("high", "high"),
-        ("low", "low"),
-        ("close", "close"),
-        ("volume", "volume"),
-        ("openinterest", -1),
-    )
-
-
-class _EmptyStrategy(bt.Strategy):
-    """Estrategia vacía requerida para que backtrader procese los datos."""
-
-    def __init__(self):
-        pass
-
-    def next(self):
-        pass
+from app.config import settings
 
 
 class BacktraderReplay:
-    """Replay 1h data and reconstruct 4h and 1d using backtrader's replay feature.
+    """Replay 1h data and reconstruct 4h/1d with dynamic buffers.
 
-    Instead of fetching pre-built 4h/1d candles, this class takes 1h candles and
-    uses backtrader to reconstruct how the higher timeframes would have formed
-    in real-time.
-
-    Flow per step:
-    1. Take 1h window of data
-    2. Reconstruct 4h via replay (4 candles = 1 x 4h)
-    3. Reconstruct 1d via replay (24 candles = 1 x 1d)
-    4. Yield {1h: df, "4h_recon": df, "1d_recon": df} with debug output
+    Los buffers startan con warmup de datos históricos para indicadores completos.
+    La vela en progreso siempre es parte del buffer (desde el inicio).
     """
 
     def __init__(
@@ -5160,243 +5189,107 @@ class BacktraderReplay:
         window_size: int | None = None,
         speed_multiplier: float = 1.0,
         refresh_seconds: float = 5.0,
-        historical_buffer: pd.DataFrame | None = None,
     ):
-        """
-        Args:
-            data_1h: DataFrame with 1h OHLCV data (timestamp, open, high, low, close, volume)
-            window_size: Number of rows per sliding window (default: 100)
-            speed_multiplier: Speed factor for replay (1.0 = real-time speed)
-            refresh_seconds: Base interval between emissions in seconds
-            historical_buffer: Historical 1h data for indicator calculation (before replay starts)
-        """
-        self._window_size = window_size or 100
+        self._window_size = window_size or settings.tensor_window_size
+        self._indicators_warmup = settings.replay_indicators_warmup  # 2400
         self._speed = speed_multiplier
         self._refresh = refresh_seconds
         self._active = False
-        self._historical_buffer = historical_buffer.copy() if historical_buffer is not None else None
 
+        # Datos 1h - asegurar que tiene índice de timestamp
         self._data_1h = data_1h.copy()
-        self._data_1h = self._data_1h.set_index("timestamp").sort_index()
+        if "timestamp" in self._data_1h.columns:
+            self._data_1h = self._data_1h.set_index("timestamp").sort_index()
         self._data_1h.index = pd.DatetimeIndex(self._data_1h.index)
 
-        self._max_steps = max(0, len(self._data_1h) - self._window_size)
+        # Total de datos disponibles para replay
+        self._total_1h = len(self._data_1h)
+
+        # Validar que hay suficientes datos para warmup + replay
+        min_required = self._indicators_warmup + 1  # al menos 1 step
+        if self._total_1h < min_required:
+            raise ValueError(
+                f"Insufficient data: {self._total_1h} rows. "
+                f"Need at least {self._indicators_warmup} for indicators warmup (~100 days). "
+                f"Requested range provides {self._total_1h - self._indicators_warmup} replay steps."
+            )
+
+        # Warmup: primeros 2400 datos para indicadores
+        self._warmup_end = self._indicators_warmup
+        self._max_steps = self._total_1h - self._warmup_end
+
+        # Fecha real de inicio del step 1
+        self._first_step_date = self._data_1h.index[self._warmup_end]
+
+        # Buffers dinámicos - startan con warmup data
+        self._buffer_1h = self._data_1h.iloc[:self._warmup_end].copy().reset_index()
+        self._buffer_1h["progress_vela"] = 1.0
+
+        # Pre-calcular 4h y 1d del warmup
+        self._buffer_4h = self._build_warmup_timeframes(self._buffer_1h, "4h")
+        self._buffer_1d = self._build_warmup_timeframes(self._buffer_1h, "1d")
+
+        # Inicializar velas en progreso con el primer dato del replay
+        first_replay_idx = self._data_1h.index[self._warmup_end]
+        first_row = self._data_1h.iloc[self._warmup_end]
+        self._current_4h = self._init_4h_candle(first_replay_idx, first_row)
+        self._current_1d = self._init_1d_candle(first_replay_idx, first_row)
+
+        # Agregar vela en progreso actual al buffer para visualización
+        self._buffer_4h = pd.concat([self._buffer_4h, pd.DataFrame([self._current_4h])], ignore_index=True)
+        self._buffer_1d = pd.concat([self._buffer_1d, pd.DataFrame([self._current_1d])], ignore_index=True)
 
         logger.info(
-            "BacktraderReplay initialized — window={}, speed={}×, steps={}, total_1h_rows={}, buffer_rows={}",
-            self._window_size,
-            self._speed,
+            "BacktraderReplay initialized — warmup={} (~100 days), steps={}, total_1h={}",
+            self._warmup_end,
             self._max_steps,
-            len(self._data_1h),
-            len(historical_buffer) if historical_buffer is not None else 0,
+            self._total_1h,
+        )
+        logger.info(
+            "Replay range: {} to {}",
+            self._data_1h.index[0],
+            self._data_1h.index[-1],
+        )
+        logger.info(
+            "Step 1 starts at: {} (date: {})",
+            self._warmup_end,
+            self._first_step_date,
         )
 
-    def _reconstruct_timeframe(self, df: pd.DataFrame, target_timeframe: str, compression: int) -> pd.DataFrame:
-        """Use backtrader to reconstruct a higher timeframe from 1h data."""
-        df_reset = df.copy()
-        
-        if "timestamp" in df_reset.columns:
-            df_reset["datetime"] = pd.to_datetime(df_reset["timestamp"])
-        elif "index" in df_reset.columns:
-            df_reset["datetime"] = pd.to_datetime(df_reset["index"])
-        else:
-            df_reset["datetime"] = df_reset.index
-            if hasattr(df_reset.index, 'to_pydatetime'):
-                df_reset["datetime"] = df_reset.index.to_pydatetime()
-            else:
-                df_reset["datetime"] = pd.to_datetime(df_reset["datetime"])
+    def _init_4h_candle(self, timestamp, row) -> dict:
+        """Inicializar vela de 4h."""
+        return {
+            "timestamp": timestamp,
+            "open": float(row["open"]),
+            "high": float(row["high"]),
+            "low": float(row["low"]),
+            "close": float(row["close"]),
+            "volume": float(row["volume"]),
+            "progress_vela": 0.25,
+        }
 
-        for col in ["open", "high", "low", "close", "volume"]:
-            if col in df_reset.columns:
-                df_reset[col] = df_reset[col].astype(float)
+    def _init_1d_candle(self, timestamp, row) -> dict:
+        """Inicializar vela de 1d."""
+        return {
+            "timestamp": timestamp,
+            "open": float(row["open"]),
+            "high": float(row["high"]),
+            "low": float(row["low"]),
+            "close": float(row["close"]),
+            "volume": float(row["volume"]),
+            "progress_vela": 1 / 24,
+        }
 
-        data_feed = PandasDataFrameFeed(
-            dataname=df_reset,
-            datetime=0,
-            open="open",
-            high="high",
-            low="low",
-            close="close",
-            volume="volume",
-            openinterest=-1,
-        )
+    def _build_warmup_timeframes(self, df_1h: pd.DataFrame, target: str) -> pd.DataFrame:
+        """Build 4h or 1d from warmup 1h data."""
+        compression = 4 if target == "4h" else 24
+        rows = []
 
-        cerebro = bt.Cerebro()
-        cerebro.adddata(data_feed)
-
-        if target_timeframe == "4h":
-            cerebro.replaydata(
-                data_feed,
-                timeframe=bt.TimeFrame.Minutes,
-                compression=240,
-            )
-        elif target_timeframe == "1d":
-            cerebro.replaydata(
-                data_feed,
-                timeframe=bt.TimeFrame.Days,
-                compression=24,
-            )
-
-        cerebro.addstrategy(_EmptyStrategy)
-
-        cerebro.run()
-        
-        result_rows = []
-        
-        # En backtrader con replaydata, solo se puede acceder a la barra actual (índice 0)
-        # ya que el replay va construyendo la barra en tiempo real
-        if len(cerebro.datas) > 1:
-            replay_data = cerebro.datas[1]
-            data_len = len(replay_data)
-            logger.debug(f"Reconstructed {target_timeframe}: {data_len} bars")
-            
-            # Solo accedemos a la barra 0 (la barra actual en construcción)
-            if data_len > 0:
-                try:
-                    result_rows.append(
-                        {
-                            "timestamp": replay_data.datetime[0],
-                            "open": float(replay_data.open[0]),
-                            "high": float(replay_data.high[0]),
-                            "low": float(replay_data.low[0]),
-                            "close": float(replay_data.close[0]),
-                            "volume": float(replay_data.volume[0] if replay_data.volume[0] else 0),
-                        }
-                    )
-                except Exception as e:
-                    logger.warning("Error accessing replay data: {}", e)
-
-        if result_rows:
-            result_df = pd.DataFrame(result_rows)
-            # Convertir a datetime64[ms, UTC] para consistencia con datos de Binance
-            result_df["timestamp"] = pd.to_datetime(result_df["timestamp"]).dt.tz_localize("UTC")
-            return result_df
-
-        return pd.DataFrame(
-            columns=["timestamp", "open", "high", "low", "close", "volume"]
-        )
-
-    async def stream(self) -> AsyncGenerator[dict[str, pd.DataFrame], None]:
-        """Async generator that yields one window per step with reconstructed timeframes.
-
-        Each step yields:
-        - combined_1h: historical buffer + current replay window (for indicator calculation)
-        - combined_4h: historical 4h buffer + reconstructed 4h
-        - combined_1d: historical 1d buffer + reconstructed 1d
-        - replay_window_1h: current 30h replay data only (progress_vela=1.0)
-        - replay_4h: reconstructed 4h with progress
-        - replay_1d: reconstructed 1d with progress
-        - step: current step number
-        """
-        self._active = True
-        delay = self._refresh / self._speed
-
-        hist_4h = self._build_historical_timeframe(self._historical_buffer, "4h") if self._historical_buffer is not None else pd.DataFrame()
-        hist_1d = self._build_historical_timeframe(self._historical_buffer, "1d") if self._historical_buffer is not None else pd.DataFrame()
-
-        for step in range(self._max_steps):
-            if not self._active:
-                logger.info("Replay stopped at step {}/{}", step, self._max_steps)
-                return
-
-            window_1h = self._data_1h.iloc[step : step + self._window_size].copy()
-            window_1h = window_1h.reset_index()
-            window_1h["progress_vela"] = 1.0
-
-            hist_portion = pd.DataFrame()
-            if self._historical_buffer is not None:
-                needed = self._window_size - (step + self._window_size)
-                if needed > 0 and step >= self._window_size:
-                    needed = self._window_size
-                hist_portion = self._historical_buffer.tail(needed) if needed > 0 else pd.DataFrame()
-
-            combined_1h = pd.concat([hist_portion, window_1h], ignore_index=True) if not hist_portion.empty else window_1h
-
-            logger.debug("Replay step {}/{}", step + 1, self._max_steps)
-
-            logger.info(f"[Step {step + 1}/{self._max_steps}]")
-            logger.info("  1h:        {} | O:{:.2f} H:{:.2f} L:{:.2f} C:{:.2f} V:{:.0f}".format(
-                window_1h["timestamp"].iloc[0].strftime("%Y-%m-%d %H:%M"),
-                window_1h["open"].iloc[0],
-                window_1h["high"].iloc[0],
-                window_1h["low"].iloc[0],
-                window_1h["close"].iloc[0],
-                window_1h["volume"].iloc[0],
-            ))
-
-            df_4h = self._reconstruct_timeframe(window_1h, "4h", 240)
-            if not df_4h.empty:
-                progress_4h = ((step % 4) + 1) / 4.0
-                df_4h["progress_vela"] = progress_4h
-
-                hist_4h_portion = hist_4h.tail(max(0, 50 - step - 1)) if step < 50 else pd.DataFrame()
-                combined_4h = pd.concat([hist_4h_portion, df_4h], ignore_index=True) if not hist_4h_portion.empty else df_4h
-            else:
-                progress_4h = 0.0
-                combined_4h = hist_4h.copy()
-
-            logger.info("  4h_recon:  {} | O:{:.2f} H:{:.2f} L:{:.2f} C:{:.2f} V:{:.0f} | P:{:.2f}".format(
-                df_4h["timestamp"].iloc[0].strftime("%Y-%m-%d") if not df_4h.empty else "N/A",
-                df_4h["open"].iloc[0] if not df_4h.empty else 0,
-                df_4h["high"].iloc[0] if not df_4h.empty else 0,
-                df_4h["low"].iloc[0] if not df_4h.empty else 0,
-                df_4h["close"].iloc[0] if not df_4h.empty else 0,
-                df_4h["volume"].iloc[0] if not df_4h.empty else 0,
-                progress_4h,
-            ))
-
-            df_1d = self._reconstruct_timeframe(window_1h, "1d", 24)
-            if not df_1d.empty:
-                progress_1d = ((step % 24) + 1) / 24.0
-                df_1d["progress_vela"] = progress_1d
-
-                hist_1d_portion = hist_1d.tail(max(0, 30 - step - 1)) if step < 30 else pd.DataFrame()
-                combined_1d = pd.concat([hist_1d_portion, df_1d], ignore_index=True) if not hist_1d_portion.empty else df_1d
-            else:
-                progress_1d = 0.0
-                combined_1d = hist_1d.copy()
-
-            logger.info("  1d_recon:  {} | O:{:.2f} H:{:.2f} L:{:.2f} C:{:.2f} V:{:.0f} | P:{:.2f}".format(
-                df_1d["timestamp"].iloc[0].strftime("%Y-%m-%d") if not df_1d.empty else "N/A",
-                df_1d["open"].iloc[0] if not df_1d.empty else 0,
-                df_1d["high"].iloc[0] if not df_1d.empty else 0,
-                df_1d["low"].iloc[0] if not df_1d.empty else 0,
-                df_1d["close"].iloc[0] if not df_1d.empty else 0,
-                df_1d["volume"].iloc[0] if not df_1d.empty else 0,
-                progress_1d,
-            ))
-
-            yield {
-                "combined_1h": combined_1h,
-                "combined_4h": combined_4h,
-                "combined_1d": combined_1d,
-                "replay_1h": window_1h,
-                "replay_4h": df_4h,
-                "replay_1d": df_1d,
-                "step": step,
-            }
-
-            await asyncio.sleep(delay)
-
-        self._active = False
-        logger.success("Replay completed — {} steps emitted", self._max_steps)
-
-    def _build_historical_timeframe(self, data_1h: pd.DataFrame, target_timeframe: str) -> pd.DataFrame:
-        """Build historical higher timeframe data from 1h buffer using backtrader."""
-        df = data_1h.copy()
-        df = df.reset_index()
-
-        if df.empty or "timestamp" not in df.columns:
-            return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume", "progress_vela"])
-
-        compression = 240 if target_timeframe == "4h" else 24
-
-        result_rows = []
-        for i in range(compression, len(df) + 1, compression):
-            chunk = df.iloc[i - compression:i]
+        for i in range(compression, len(df_1h) + 1, compression):
+            chunk = df_1h.iloc[i - compression:i]
             if chunk.empty:
                 continue
-            result_rows.append({
+            rows.append({
                 "timestamp": chunk["timestamp"].iloc[-1],
                 "open": chunk["open"].iloc[0],
                 "high": chunk["high"].max(),
@@ -5406,7 +5299,115 @@ class BacktraderReplay:
                 "progress_vela": 1.0,
             })
 
-        return pd.DataFrame(result_rows)
+        return pd.DataFrame(rows)
+
+    @property
+    def first_step_date(self):
+        """Retorna la fecha real donde comienza el step 1."""
+        return self._first_step_date
+
+    async def stream(self) -> AsyncGenerator[dict, None]:
+        """Async generator que yield buffers dinámicos por cada step.
+
+        Yields:
+            - buffer_1h: DataFrame con todas las velas 1h acumuladas
+            - buffer_4h: DataFrame con velas 4h (cerradas + en progreso)
+            - buffer_1d: DataFrame con velas 1d (cerradas + en progreso)
+            - step: número de step actual
+        """
+        self._active = True
+        delay = self._refresh / self._speed
+
+        # El replay starts desde warmup_end
+        for step in range(self._max_steps):
+            if not self._active:
+                logger.info("Replay stopped at step {}/{}", step, self._max_steps)
+                return
+
+            # Índice del dato 1h actual (del range total)
+            data_idx = self._warmup_end + step
+            current_timestamp = self._data_1h.index[data_idx]
+            current_row = self._data_1h.iloc[data_idx]
+
+            # Agregar al buffer 1h
+            new_1h_row = {
+                "timestamp": current_timestamp,
+                "open": float(current_row["open"]),
+                "high": float(current_row["high"]),
+                "low": float(current_row["low"]),
+                "close": float(current_row["close"]),
+                "volume": float(current_row["volume"]),
+                "progress_vela": 1.0,
+            }
+            self._buffer_1h = pd.concat([self._buffer_1h, pd.DataFrame([new_1h_row])], ignore_index=True)
+
+            # Actualizar 4h
+            step_in_4h = step % 4
+            progress_4h = (step_in_4h + 1) / 4.0
+
+            if self._current_4h is not None:
+                self._current_4h["high"] = max(self._current_4h["high"], new_1h_row["high"])
+                self._current_4h["low"] = min(self._current_4h["low"], new_1h_row["low"])
+                self._current_4h["close"] = new_1h_row["close"]
+                self._current_4h["volume"] += new_1h_row["volume"]
+                self._current_4h["progress_vela"] = progress_4h
+                self._current_4h["timestamp"] = current_timestamp
+
+                # Si es el último del grupo de 4, cerrar y crear nueva
+                if step_in_4h == 3:
+                    self._current_4h["progress_vela"] = 1.0
+                    closed_4h = self._current_4h.copy()
+                    self._buffer_4h = pd.concat([self._buffer_4h, pd.DataFrame([closed_4h])], ignore_index=True)
+
+                    # Crear nueva vela
+                    if data_idx + 1 < self._total_1h:
+                        next_timestamp = self._data_1h.index[data_idx + 1]
+                        next_row = self._data_1h.iloc[data_idx + 1]
+                        self._current_4h = self._init_4h_candle(next_timestamp, next_row)
+
+            # Actualizar 1d
+            step_in_1d = step % 24
+            progress_1d = (step_in_1d + 1) / 24.0
+
+            if self._current_1d is not None:
+                self._current_1d["high"] = max(self._current_1d["high"], new_1h_row["high"])
+                self._current_1d["low"] = min(self._current_1d["low"], new_1h_row["low"])
+                self._current_1d["close"] = new_1h_row["close"]
+                self._current_1d["volume"] += new_1h_row["volume"]
+                self._current_1d["progress_vela"] = progress_1d
+                self._current_1d["timestamp"] = current_timestamp
+
+                # Si es el último del grupo de 24, cerrar y crear nueva
+                if step_in_1d == 23:
+                    self._current_1d["progress_vela"] = 1.0
+                    closed_1d = self._current_1d.copy()
+                    self._buffer_1d = pd.concat([self._buffer_1d, pd.DataFrame([closed_1d])], ignore_index=True)
+
+                    # Crear nueva vela
+                    if data_idx + 1 < self._total_1h:
+                        next_timestamp = self._data_1h.index[data_idx + 1]
+                        next_row = self._data_1h.iloc[data_idx + 1]
+                        self._current_1d = self._init_1d_candle(next_timestamp, next_row)
+
+            # Log simplificado
+            logger.info(
+                f"[Step {step + 1}/{self._max_steps}] | "
+                f"1h: {len(self._buffer_1h)} | "
+                f"4h: {len(self._buffer_4h)} (p:{progress_4h:.2f}) | "
+                f"1d: {len(self._buffer_1d)} (p:{progress_1d:.2f})"
+            )
+
+            yield {
+                "buffer_1h": self._buffer_1h.copy(),
+                "buffer_4h": self._buffer_4h.copy(),
+                "buffer_1d": self._buffer_1d.copy(),
+                "step": step,
+            }
+
+            await asyncio.sleep(delay)
+
+        self._active = False
+        logger.success("Replay completed — {} steps emitted", self._max_steps)
 
     def stop(self) -> None:
         """Stop the replay mid-stream."""
@@ -5414,12 +5415,10 @@ class BacktraderReplay:
 
     @property
     def is_active(self) -> bool:
-        """Check if replay is currently running."""
         return self._active
 
     @property
     def total_steps(self) -> int:
-        """Total number of replay steps available."""
         return self._max_steps
 `````
 
@@ -5575,7 +5574,8 @@ class IndicatorEngine:
         has_enough_data = len(df) >= min_rows
         
         if not has_enough_data:
-            logger.warning(f"DataFrame has only {len(df)} rows, need {min_rows} for full indicators")
+            # logger.warning(f"DataFrame has only {len(df)} rows, need {min_rows} for full indicators")
+            pass
 
         total_indicators = 0
 
@@ -5596,16 +5596,16 @@ class IndicatorEngine:
                     
                     result[col_name] = fn(result)
                 except Exception as exc:
-                    logger.warning("Indicator {} failed: {}", col_name, exc)
+                    # logger.warning("Indicator {} failed: {}", col_name, exc)
                     result[col_name] = float("nan")
                 total_indicators += 1
 
-        logger.debug(
-            "Computed {} indicators for {} (suffix={})",
-            total_indicators,
-            group_name,
-            suffix,
-        )
+        # logger.debug(
+        #     "Computed {} indicators for {} (suffix={})",
+        #     total_indicators,
+        #     group_name,
+        #     suffix,
+        # )
         return result
 
     @classmethod
@@ -5630,7 +5630,13 @@ class IndicatorEngine:
     @classmethod
     def compute_multi_timeframe(cls, data: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
         """Compute indicators for each timeframe in the dict."""
-        return {tf: cls.compute(df, timeframe_suffix=tf) for tf, df in data.items()}
+        result = {}
+        for tf, df in data.items():
+            df_with_indicators = cls.compute(df, timeframe_suffix=tf)
+            numeric_cols = df_with_indicators.select_dtypes(include=['float64', 'float32', 'int64', 'int32']).columns
+            df_with_indicators[numeric_cols] = df_with_indicators[numeric_cols].round(2)
+            result[tf] = df_with_indicators
+        return result
 
     @classmethod
     def get_group_columns(cls, group: str, timeframe_suffix: str = "") -> list[str]:
@@ -5655,198 +5661,7 @@ class IndicatorEngine:
 
 ## File: app/core/tensor/builder.py
 `````python
-"""
-RF-8 / RF-10 / RF-11: Tensor construction with sliding windows.
 
-Builds a PyTorch tensor of shape ``(num_windows, window_size, num_features)``
-from a fully synchronized and normalized DataFrame.  Each window is a
-30 × N slice ready for neural network consumption.
-"""
-
-import numpy as np
-import pandas as pd
-import torch
-from loguru import logger
-
-from app.config import settings
-from app.core.processing.indicators import IndicatorEngine
-
-
-class TensorBuilder:
-    """Construct sliding-window tensors from a synchronized feature DataFrame.
-
-    Satisfies:
-    - RF-8:  Tensor shape ``30 × N`` with sliding windows.
-    - RF-10: No out-of-range values, no temporal misalignment.
-    - RF-11: Standard column layout per timeframe block + global vars.
-    """
-
-    def __init__(self, window_size: int | None = None):
-        self._window_size = window_size or settings.tensor_window_size
-
-    # ── Public API ──────────────────────────────────
-
-    def build(self, df: pd.DataFrame) -> torch.Tensor:
-        """Create a 3-D tensor from the synchronized DataFrame.
-
-        Args:
-            df: Fully synchronized, normalized DataFrame
-                (index = timestamps, columns = features).
-
-        Returns:
-            ``torch.Tensor`` of shape ``(num_windows, window_size, num_features)``.
-
-        Raises:
-            ValueError: If the DataFrame has fewer rows than the window size.
-        """
-        self._validate(df)
-
-        values = df.select_dtypes(include=[np.number]).values  # (T, N)
-        num_rows, num_features = values.shape
-        num_windows = num_rows - self._window_size + 1
-
-        # Sliding-window view — zero-copy where possible
-        windows = np.lib.stride_tricks.sliding_window_view(values, self._window_size, axis=0)
-        # windows shape: (num_windows, num_features, window_size) → transpose
-        windows = windows.transpose(0, 2, 1)  # → (num_windows, window_size, num_features)
-
-        tensor = torch.tensor(windows, dtype=torch.float32)
-
-        logger.success(
-            "Tensor built — shape {} (windows={}, steps={}, features={})",
-            list(tensor.shape),
-            num_windows,
-            self._window_size,
-            num_features,
-        )
-        return tensor
-
-    def build_single_window(self, df: pd.DataFrame) -> torch.Tensor:
-        """Build a single ``(1, window_size, N)`` tensor from the last rows.
-
-        Useful for real-time inference where only the latest window matters.
-        """
-        tail = df.tail(self._window_size)
-        self._validate(tail)
-        values = tail.select_dtypes(include=[np.number]).values
-        tensor = torch.tensor(values, dtype=torch.float32).unsqueeze(0)
-        return tensor
-
-    def build_grouped(self, df: pd.DataFrame) -> dict[str, torch.Tensor]:
-        """Build separate tensors for each indicator group.
-
-        Each tensor contains:
-        - Indicator columns for that specific group (from all timeframes)
-        - progress_vela columns (1h, 4h, 1d) - shared across all groups
-
-        Args:
-            df: Fully synchronized, normalized DataFrame.
-
-        Returns:
-            Dict with keys: "velocidad", "tendencia", "amplitud", "liquidez"
-            Each value is a torch.Tensor of shape (1, window_size, num_features).
-        """
-        self._validate(df)
-
-        # Columns de progreso de vela (comunes a todos los grupos)
-        progress_cols = [
-            "progress_vela_1h",
-            "progress_vela_4h", 
-            "progress_vela_1d",
-        ]
-        available_progress = [c for c in progress_cols if c in df.columns]
-
-        # Obtener indicadores POR GRUPO
-        groups_dict = {}
-        for group_name, group_indicators in IndicatorEngine._GROUPS.items():
-            indicator_base_names = [label for label, _ in group_indicators]
-            
-            group_indicators_available = []
-            for base_name in indicator_base_names:
-                for tf_suffix in ["_1h", "_4h", "_1d"]:
-                    full_name = f"{base_name}{tf_suffix}"
-                    if full_name in df.columns:
-                        group_indicators_available.append(full_name)
-            
-            groups_dict[group_name] = group_indicators_available
-
-        # Construir tensor para cada grupo
-        result = {}
-        
-        for group_name, indicator_cols in groups_dict.items():
-            group_cols = available_progress + indicator_cols
-
-            if not group_cols:
-                logger.warning(f"No columns found for group {group_name}")
-                result[group_name] = None
-                continue
-
-            valid_cols = [c for c in group_cols if c in df.columns]
-            group_df = df[valid_cols].select_dtypes(include=[np.number])
-            values = group_df.values
-
-            if len(values) < self._window_size:
-                logger.warning(f"Group {group_name}: not enough rows ({len(values)} < {self._window_size})")
-                result[group_name] = None
-                continue
-
-            # Sliding window view
-            windows = np.lib.stride_tricks.sliding_window_view(values, self._window_size, axis=0)
-            windows = windows.transpose(0, 2, 1)
-
-            tensor = torch.tensor(windows, dtype=torch.float32)
-
-            logger.info(
-                "Grupo {}: shape {} (indicators={}, progress={})",
-                group_name,
-                list(tensor.shape),
-                len(indicator_cols),
-                len(available_progress),
-            )
-
-            result[group_name] = tensor
-
-        return result
-
-    # ── Validation ──────────────────────────────────
-
-    def _validate(self, df: pd.DataFrame) -> None:
-        """RF-10 structural validation."""
-        if len(df) < self._window_size:
-            raise ValueError(
-                f"DataFrame has {len(df)} rows but window_size={self._window_size}"
-            )
-
-        numeric = df.select_dtypes(include=[np.number])
-
-        # Check for NaN / Inf
-        if numeric.isnull().any().any():
-            nan_cols = numeric.columns[numeric.isnull().any()].tolist()
-            logger.warning("NaN detected in columns: {} — filling with 0", nan_cols)
-            df[nan_cols] = df[nan_cols].fillna(0)
-
-        if np.isinf(numeric.values).any():
-            raise ValueError("Infinite values detected in feature DataFrame")
-
-    # ── Metadata ────────────────────────────────────
-
-    def describe(self, df: pd.DataFrame) -> dict:
-        """Return a summary of what the tensor would look like.
-
-        Useful for the observability endpoint (RNF-4).
-        """
-        numeric = df.select_dtypes(include=[np.number])
-        num_rows = len(df)
-        num_features = len(numeric.columns)
-        num_windows = max(0, num_rows - self._window_size + 1)
-        return {
-            "window_size": self._window_size,
-            "num_features": num_features,
-            "num_rows": num_rows,
-            "num_windows": num_windows,
-            "tensor_shape": [num_windows, self._window_size, num_features],
-            "feature_columns": numeric.columns.tolist(),
-        }
 `````
 
 ## File: app/main.py
@@ -5864,7 +5679,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import __version__
-from app.api.routes import data, replay, tensor
+from app.api.routes import data, replay  # tensor deshabilitado
 from app.api.schemas import HealthResponse
 from app.utils.logger import setup_logging
 
@@ -5897,8 +5712,8 @@ app.add_middleware(
 
 # ── Routes ──────────────────────────────────────────
 app.include_router(data.router)
-app.include_router(tensor.router)
 app.include_router(replay.router)
+# app.include_router(tensor.router)  # deshabilitado
 
 
 # ── Health ──────────────────────────────────────────
@@ -5908,205 +5723,59 @@ def health_check():
     return HealthResponse(status="ok", version=__version__)
 `````
 
-## File: app/utils/logger.py
-`````python
-"""
-Centralized logging configuration using Loguru.
-
-Provides structured, colored console output and optional file rotation.
-Satisfies RNF-4 (Observability).
-"""
-
-import sys
-
-from loguru import logger
-
-from app.config import settings
-
-
-def setup_logging() -> None:
-    """Configure Loguru for the application."""
-    # Remove default handler
-    logger.remove()
-
-    # Console handler — colorized, with context
-    log_level = "DEBUG" if settings.app_debug else "INFO"
-    logger.add(
-        sys.stderr,
-        level=log_level,
-        format=(
-            "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | "
-            "<level>{level: <8}</level> | "
-            "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> — "
-            "<level>{message}</level>"
-        ),
-        colorize=True,
-    )
-
-    # File handler — rotated daily, kept 7 days
-    logger.add(
-        "logs/ia_app_{time:YYYY-MM-DD}.log",
-        rotation="1 day",
-        retention="7 days",
-        level="DEBUG",
-        format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} — {message}",
-    )
-
-    logger.info("Logging initialized — level={}", log_level)
-`````
-
-## File: README.md
-`````markdown
-# IA-APP: Estrategia de Inversión Cuantitativa
-
-Este proyecto implementa una **Inteligencia Artificial** especializada en mercados financieros, diseñada para generar señales de compra y venta con objetivos de rentabilidad superiores al 10%. El sistema integra técnicas avanzadas de Deep Learning con metodologías cuantitativas de vanguardia.
-
-## Características Principales
-
-- **Deep Reinforcement Learning (DRL):** El agente aprende directamente de los resultados financieros, optimizando la estrategia en entornos simulados antes de operar en real.
-- **Arquitectura Multimodal (xLSTM):** Integra información de precios, volumen, indicadores técnicos y sentimiento de mercado para tomar decisiones holísticas.
-- **Gestión de Riesgo Avanzada:** Implementa el **Triple Barrier Method** y **Differentiable Sharpe Ratio** para asegurar ratios riesgo/beneficio favorables (objetivo 1:4) y evitar el _overfitting_.
-- **Estructura Modular (RF-1 a RF-11):** El código sigue una arquitectura estricta que separa la recolección de datos, cálculo de indicadores, construcción de tensores y lógica de inferencia.
-
-## Arquitectura Técnica
-
-El sistema está organizado en los siguientes módulos principales:
-
-1.  **Data Fetcher:** Obtiene datos históricos de múltiples temporalidades (1h, 4h, 1d) desde fuentes fiables (Binance, CCXT).
-2.  **Indicator Engine:** Calcula indicadores técnicos (SMA, EMA, MACD, Bollinger Bands, etc.) utilizando la librería `ta`.
-3.  **Tensor Builder:** Estructura los datos en tensores 3D para el entrenamiento de redes neuronales, preservando el orden temporal.
-4.  **Model Architecture:** Implementación de redes basadas en **Transformers** y **LSTM** adaptadas a datos financieros (xLSTM, PatchTST).
-5.  **Risk Manager:** Define las condiciones de salida y profit (10%) y stop-loss (2%) para guiar el entrenamiento.
-
-## Instalación y Ejecución
-
-### Requisitos
-
-- Python 3.9+
-- CUDA (para entrenamiento GPU)
-
-### Instalación de Dependencias
-
-```bash
-git clone https://github.com/tuusuario/IA-APP.git
-cd IA-APP
-pip install -r requirements.txt
-```
-
-### Ejecución
-
-- **Entrenamiento:**
-  ```bash
-  python train.py --symbol BTC/USDT --epochs 50 --window-size 30
-  ```
-- **Inferencia (Modo Replay):**
-  ```bash
-  python main.py --mode replay --symbol BTC/USDT --speed 2.0
-  ```
-
-## 📊 Estrategia de Mercado
-
-- **Símbolo:** BTC/USDT
-- **Objetivo de Profit:** +10% por operación.
-- **Stop Loss:** -2%.
-- **Horizonte:** Corto / Medio plazo.
-- **Temporalidades:** 1h, 4h, 1d (sincronizadas).
-`````
-
-## File: requirements.txt
-`````
-# ── Server ──────────────────────────────────────────
-fastapi>=0.115.0
-uvicorn[standard]>=0.34.0
-pydantic>=2.11.0
-pydantic-settings>=2.9.0
-python-dotenv>=1.0.0
-
-# ── Data Ingestion ──────────────────────────────────
-ccxt>=4.5.0
-
-# ── Data Processing & Analysis ──────────────────────
-pandas>=2.2.0
-numpy>=2.1.0
-ta>=0.11.0
-
-# ── Time-Series & Replay ───────────────────────────
-darts>=0.32.0
-backtrader>=1.9.78.123
-
-# ── Tensor / Deep Learning Backend ──────────────────
-torch>=2.6.0
-
-# ── Observability & Logging ─────────────────────────
-loguru>=0.7.0
-
-# ── Testing ─────────────────────────────────────────
-pytest>=8.0.0
-httpx>=0.28.0
-`````
-
 ## File: app/api/routes/replay.py
 `````python
 """
 Replay endpoints — start, stop, and status of market replay sessions.
 Covers RF-5 (Market Replay) exposure via API.
 
-Uses BacktraderReplay to reconstruct 4h and 1d candles from 1h data,
-providing more realistic backtesting than pre-built candles.
+Usa BacktraderReplay con buffers dinámicos:
+- buffer_1h: todas las velas 1h acumuladas (warmup + progresivas)
+- buffer_4h: velas 4h (cerradas + en progreso)
+- buffer_1d: velas 1d (cerradas + en progreso)
 
-Each replay step integrates with the full tensor pipeline:
-fetch 1h → reconstruct 4h/1d → indicators → sync → normalize → tensor.
+El replay usa TODOS los datos acumulados para indicadores.
 """
 
 import asyncio
-from typing import Any
 
 from fastapi import APIRouter, HTTPException
 import pandas as pd
-import torch
 
 from app.api.schemas import PipelineStatus, ReplayRequest
 from app.config import settings
 from app.core.data_ingestion.historical import HistoricalDataFetcher
 from app.core.data_ingestion.replay_backtrader import BacktraderReplay
 from app.core.processing.indicators import IndicatorEngine
-from app.core.processing.normalizer import Normalizer
 from app.core.sync.multi_timeframe import MultiTimeframeSync
-from app.core.tensor.builder import TensorBuilder
 
 router = APIRouter(prefix="/replay", tags=["Market Replay"])
 
 _historical = HistoricalDataFetcher()
 _sync = MultiTimeframeSync()
-_normalizer = Normalizer()
-_builder = TensorBuilder()
 
 _current_replay: BacktraderReplay | None = None
 _current_step: int = 0
-_tensors_grouped: list[dict[str, torch.Tensor]] = []
 _replay_active: bool = False
+_current_sync_type = "timeframe"
+_current_sync_version = "indicators"
 
 
 @router.post("/start")
 async def start_replay(req: ReplayRequest):
-    """Start a new market replay session using Backtrader data replay.
+    """Start a new market replay session.
 
-    Fetches 1h historical data (last 2+ months), then uses Backtrader to reconstruct 4h and 1d
-    candles in real-time as the replay progresses.
+    Fetch 1h del rango especificado (since - until).
+    Por cada step:
+    - Agregar vela 1h al buffer
+    - Reconstruir 4h (cierra cada 4 steps)
+    - Reconstruir 1d (cierra cada 24 steps)
+    - Calcular indicadores con TODOS los datos acumulados
+    - sincronizar timeframes
 
-    Each step executes the full pipeline:
-    1. Take 1h window + historical buffer for indicators
-    2. Reconstruct 4h via backtrader replay
-    3. Reconstruct 1d via backtrader replay
-    4. Compute indicators on combined data
-    5. Synchronize timeframes
-    6. Normalize
-    7. Build tensor
-
-    Returns:
-        status, total_steps, speed multiplier
+    El replay es indefinido - recorre todos los datos del rango.
     """
-    global _current_replay, _current_step, _tensors, _replay_active
+    global _current_replay, _current_step, _replay_active, _current_sync_type, _current_sync_version
 
     if _current_replay and _current_replay.is_active:
         raise HTTPException(status_code=409, detail="Replay already running — stop it first")
@@ -6115,6 +5784,7 @@ async def start_replay(req: ReplayRequest):
         since = req.since or (req.until if req.until else None)
         until = req.until
 
+        # Fetch 1h del rango completo
         raw_1h = _historical.fetch(
             symbol=req.symbol,
             timeframe="1h",
@@ -6122,23 +5792,26 @@ async def start_replay(req: ReplayRequest):
             until=until,
         )
 
-        min_indicators_buffer = 100
-        
-        historical_buffer = None
-        if len(raw_1h) > settings.tensor_window_size + min_indicators_buffer:
-            historical_buffer = raw_1h.iloc[:-(settings.tensor_window_size + min_indicators_buffer)].copy()
-            raw_1h = raw_1h.iloc[-(settings.tensor_window_size + min_indicators_buffer):].copy()
+        min_required = settings.replay_indicators_warmup + 1
+        if len(raw_1h) < min_required:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Insufficient data: {len(raw_1h)} rows. Need at least {min_required} (~{min_required//24} days). "
+                f"Indicators warmup uses {settings.replay_indicators_warmup} rows (~{settings.replay_indicators_warmup//24} days). "
+                f"This leaves {len(raw_1h) - settings.replay_indicators_warmup} replay steps."
+            )
 
+        # Crear replay con warmup de 2400 datos para indicadores completos
         _current_replay = BacktraderReplay(
             data_1h=raw_1h,
             window_size=settings.tensor_window_size,
             speed_multiplier=req.speed_multiplier,
             refresh_seconds=settings.replay_refresh_seconds,
-            historical_buffer=historical_buffer,
         )
         _current_step = 0
-        _tensors_grouped = []
         _replay_active = True
+        _current_sync_type = req.sync_type or settings.sync_type
+        _current_sync_version = req.sync_version or settings.sync_version
 
         asyncio.create_task(_run_replay())
 
@@ -6146,10 +5819,16 @@ async def start_replay(req: ReplayRequest):
             "status": "started",
             "total_steps": _current_replay.total_steps,
             "speed": req.speed_multiplier,
-            "window_size": settings.tensor_window_size,
-            "buffer_hours": len(historical_buffer) if historical_buffer is not None else 0,
-            "note": "Using Backtrader replay: 1h → 4h/1d reconstruction with historical buffer",
+            "warmup_1h_rows": settings.replay_indicators_warmup,
+            "warmup_days": settings.replay_indicators_warmup // 24,
+            "total_1h_data": len(raw_1h),
+            "replay_start_date": str(_current_replay.first_step_date),
+            "sync_type": _current_sync_type,
+            "sync_version": _current_sync_version,
+            "note": f"Indicators warmup uses {settings.replay_indicators_warmup} rows (~100 days). Step 1 starts at: {_current_replay.first_step_date}",
         }
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
@@ -6164,7 +5843,6 @@ def stop_replay():
         return {
             "status": "stopped",
             "step": _current_step,
-            "tensors_built": len(_tensors_grouped),
         }
     return {"status": "no_replay_running"}
 
@@ -6180,51 +5858,32 @@ def replay_status():
     )
 
 
-@router.get("/tensors")
-def get_tensors():
-    """Return the tensors built during replay (grouped by indicator category)."""
-    if not _tensors_grouped:
-        return {"count": 0, "shapes": {}}
-
-    shapes = []
-    for tg in _tensors_grouped:
-        step_shapes = {k: list(v.shape) if v is not None else None for k, v in tg.items()}
-        shapes.append(step_shapes)
-
-    return {
-        "count": len(_tensors_grouped),
-        "shapes": shapes,
-    }
-
-
-@router.get("/tensor/{step}/{grupo}")
-def get_tensor_by_group(step: int, grupo: str):
-    """Get tensor for a specific step and group (velocidad/tendencia/amplitud/liquidez)."""
-    valid_groups = ["velocidad", "tendencia", "amplitud", "liquidez"]
-    if grupo not in valid_groups:
-        raise HTTPException(status_code=400, detail=f"Grupo inválido. Available: {valid_groups}")
-
-    if step < 0 or step >= len(_tensors_grouped):
-        raise HTTPException(status_code=404, detail=f"Step {step} not found")
-
-    tensor = _tensors_grouped[step].get(grupo)
-    if tensor is None:
-        raise HTTPException(status_code=404, detail=f"Tensor for grupo '{grupo}' at step {step} is None")
-
-    return {
-        "step": step,
-        "grupo": grupo,
-        "shape": list(tensor.shape),
-        "data": tensor.numpy().tolist(),
-    }
-
-
 async def _run_replay():
-    """Consume the replay stream and build tensors."""
-    global _current_step, _replay_active
+    """Consume the replay stream and process with indicators."""
+    global _current_step, _replay_active, _current_sync_type, _current_sync_version
 
     if not _current_replay:
         return
+
+    # Asegurar valores por defecto del sync
+    if not _current_sync_type:
+        _current_sync_type = settings.sync_type
+    if not _current_sync_version:
+        _current_sync_version = settings.sync_version
+
+    # Mensaje de inicio con fecha exacta
+    first_date = _current_replay.first_step_date
+    window_size = settings.tensor_window_size
+    window_end = first_date + pd.Timedelta(hours=window_size)
+
+    logger.info("=== REPLAY START ===")
+    logger.info("Total steps: {}".format(_current_replay.total_steps))
+    logger.info("Warmup rows: {} (~100 days)".format(settings.replay_indicators_warmup))
+    logger.info("Step 1 starts at: {}".format(first_date))
+    logger.info("Window size: {} hours".format(window_size))
+    logger.info("First window (100 steps): {} to {}".format(first_date, window_end))
+    logger.info("Sync type: {} (version: {})".format(_current_sync_type, _current_sync_version))
+    logger.info("=" * 40)
 
     try:
         async for window in _current_replay.stream():
@@ -6235,83 +5894,107 @@ async def _run_replay():
             _current_step = step + 1
 
             try:
-                data = {
-                    "1h": window["combined_1h"],
-                    "4h": window["combined_4h"],
-                    "1d": window["combined_1d"],
+                buffers = {
+                    "1h": window["buffer_1h"],
+                    "4h": window["buffer_4h"],
+                    "1d": window["buffer_1d"],
                 }
 
-                with_indicators = IndicatorEngine.compute_multi_timeframe(data)
+                # Obtener datos DIRECTAMENTE de los buffers - NO del sync
+                buf_1h = buffers["1h"]
+                buf_4h = buffers["4h"]
+                buf_1d = buffers["1d"]
 
-                synced = _sync.synchronize(with_indicators)
-                synced = MultiTimeframeSync.add_global_features(synced)
+                last_1h = buf_1h.iloc[-1].to_dict() if not buf_1h.empty else {}
+                last_4h = buf_4h.iloc[-1].to_dict() if not buf_4h.empty else {}
+                last_1d = buf_1d.iloc[-1].to_dict() if not buf_1d.empty else {}
 
-                synced = _add_replay_progress(synced, window)
+                # Log de reconstrucción - usando valores de los buffers directamente
+                logger.info("=== Step {} ===".format(step))
+                logger.info("1h: O:{:.2f} H:{:.2f} L:{:.2f} C:{:.2f} V:{:.0f} P:{:.2f}".format(
+                    last_1h.get("open", 0),
+                    last_1h.get("high", 0),
+                    last_1h.get("low", 0),
+                    last_1h.get("close", 0),
+                    last_1h.get("volume", 0),
+                    last_1h.get("progress_vela", 1.0),
+                ))
+                logger.info("4h: O:{:.2f} H:{:.2f} L:{:.2f} C:{:.2f} V:{:.0f} P:{:.2f}".format(
+                    last_4h.get("open", 0),
+                    last_4h.get("high", 0),
+                    last_4h.get("low", 0),
+                    last_4h.get("close", 0),
+                    last_4h.get("volume", 0),
+                    last_4h.get("progress_vela", 0.0),
+                ))
+                logger.info("1d: O:{:.2f} H:{:.2f} L:{:.2f} C:{:.2f} V:{:.0f} P:{:.2f}".format(
+                    last_1d.get("open", 0),
+                    last_1d.get("high", 0),
+                    last_1d.get("low", 0),
+                    last_1d.get("close", 0),
+                    last_1d.get("volume", 0),
+                    last_1d.get("progress_vela", 0.0),
+                ))
 
-                logger.info("=== Step {} - ALL COLUMNS (sync) ===".format(step))
-                logger.info("Shape: {} rows x {} cols".format(synced.shape[0], synced.shape[1]))
-                logger.info("Columns: {}".format(list(synced.columns)))
-                logger.info("Last row (all cols): {}".format(synced.iloc[-1].to_dict()))
+                # Sincronizar para uso interno (tensor)
+                # Debug: mostrar tamaño de buffers antes del sync
+                # logger.debug("Before sync - buffers: 1h:{}, 4h:{}, 1d:{}".format(
+                #     len(buffers["1h"]), len(buffers["4h"]), len(buffers["1d"])))
 
-                normalized = synced  # Sin normalizacion - usar datos crudos
+                try:
+                    with_indicators = IndicatorEngine.compute_multi_timeframe(buffers)
+                    synced = _sync.synchronize(
+                        with_indicators,
+                        sync_type=_current_sync_type,
+                        sync_version=_current_sync_version
+                    )
+                    synced = MultiTimeframeSync.add_global_features(synced)
 
-                tensors_grouped = _builder.build_grouped(normalized)
-                _tensors_grouped.append(tensors_grouped)
+                    logger.debug("Sync completed - shape: {}".format(synced.shape))
 
-                shapes_str = ", ".join([f"{k}:{v.shape[1:] if v is not None else 'None'}" for k, v in tensors_grouped.items()])
-                logger.info(
-                    "[Step {}/{}] Tensores: {}",
-                    _current_step,
-                    _current_replay.total_steps,
-                    shapes_str,
-                )
+                    if synced.empty:
+                        logger.warning("Sync returned empty DataFrame")
+                        continue
+
+                except Exception as sync_error:
+                    logger.error("Sync failed at step {}: {}", _current_step, sync_error)
+                    continue
+
+                # Log del sync generado - TODAS las columnas
+                logger.info("=== SYNC (type:{}, ver:{}) | rows:{} | cols:{} ===".format(
+                    _current_sync_type, _current_sync_version, synced.shape[0], synced.shape[1]))
+                for col in synced.columns:
+                    val = synced.iloc[-1][col]
+                    if pd.notna(val):
+                        logger.info("  {}: {}".format(col, val))
+
+                last_row = synced.iloc[-1].round(2)
+
+                # Nueva fila completa con TODOS los indicadores por temporalidad
+                def get_indicator_cols(prefix):
+                    cols = []
+                    for col in last_row.index:
+                        if f"_{prefix}" in col:
+                            val = last_row[col]
+                            if pd.notna(val):
+                                indicator_name = col.replace(f"_{prefix}", "")
+                                cols.append("{}:{}".format(indicator_name, val))
+                    return " | ".join(cols) if cols else "N/A"
+
+                logger.info("=== FULL ROW - INDICATORS ===")
+                logger.info("1h: |{}|".format(get_indicator_cols("1h")))
+                logger.info("4h: |{}|".format(get_indicator_cols("4h")))
+                logger.info("1d: |{}|".format(get_indicator_cols("1d")))
 
             except Exception as e:
-                logger.error("Error building tensor at step {}: {}", _current_step, e)
+                logger.error("Error at step {}: {}", _current_step, e)
 
         _replay_active = False
-        logger.success("Replay finished — {} steps completed".format(len(_tensors_grouped)))
-
-        logger.info("=== FINAL TENSORS ===")
-        for group_name, tensor in _tensors_grouped[-1].items():
-            if tensor is not None:
-                logger.info("Grupo: {} | Shape: {} | Indicadores count: {}".format(
-                    group_name,
-                    list(tensor.shape),
-                    tensor.shape[2] - 3
-                ))
-                logger.info("Tensor {} (no normalized) - last row sample: {}".format(
-                    group_name,
-                    tensor[0, -1, :10].tolist()
-                ))
+        logger.success("Replay finished — {} steps completed".format(_current_step))
 
     except Exception as e:
         logger.error("Replay error: {}", e)
         _replay_active = False
-
-
-def _add_replay_progress(df: pd.DataFrame, window: dict) -> pd.DataFrame:
-    """Add progress_vela columns from replay window to the synchronized DataFrame.
-
-    Uses the replay_1h, replay_4h, replay_1d data to get the current progress values.
-    """
-    result = df.copy()
-
-    progress_1h = window["replay_1h"]["progress_vela"].iloc[-1] if "progress_vela" in window["replay_1h"].columns else 1.0
-
-    progress_4h = 0.0
-    if not window["replay_4h"].empty and "progress_vela" in window["replay_4h"].columns:
-        progress_4h = window["replay_4h"]["progress_vela"].iloc[-1]
-
-    progress_1d = 0.0
-    if not window["replay_1d"].empty and "progress_vela" in window["replay_1d"].columns:
-        progress_1d = window["replay_1d"]["progress_vela"].iloc[-1]
-
-    result["progress_vela_1h"] = progress_1h
-    result["progress_vela_4h"] = progress_4h
-    result["progress_vela_1d"] = progress_1d
-
-    return result
 
 
 from loguru import logger

@@ -81,10 +81,6 @@ class BacktraderReplay:
         self._current_4h = self._init_4h_candle(first_replay_idx, first_row)
         self._current_1d = self._init_1d_candle(first_replay_idx, first_row)
 
-        # Agregar vela en progreso actual al buffer para visualización
-        self._buffer_4h = pd.concat([self._buffer_4h, pd.DataFrame([self._current_4h])], ignore_index=True)
-        self._buffer_1d = pd.concat([self._buffer_1d, pd.DataFrame([self._current_1d])], ignore_index=True)
-
         logger.info(
             "BacktraderReplay initialized — warmup={} (~100 days), steps={}, total_1h={}",
             self._warmup_end,
@@ -164,6 +160,10 @@ class BacktraderReplay:
         self._active = True
         delay = self._refresh / self._speed
 
+        # Agregar las velas en progreso actuales al buffer
+        self._buffer_4h = pd.concat([self._buffer_4h, pd.DataFrame([self._current_4h])], ignore_index=True)
+        self._buffer_1d = pd.concat([self._buffer_1d, pd.DataFrame([self._current_1d])], ignore_index=True)
+
         # El replay starts desde warmup_end
         for step in range(self._max_steps):
             if not self._active:
@@ -205,11 +205,16 @@ class BacktraderReplay:
                     closed_4h = self._current_4h.copy()
                     self._buffer_4h = pd.concat([self._buffer_4h, pd.DataFrame([closed_4h])], ignore_index=True)
 
-                    # Crear nueva vela
+                    # Crear nueva vela con progress inicial
                     if data_idx + 1 < self._total_1h:
                         next_timestamp = self._data_1h.index[data_idx + 1]
                         next_row = self._data_1h.iloc[data_idx + 1]
                         self._current_4h = self._init_4h_candle(next_timestamp, next_row)
+                        self._buffer_4h = pd.concat([self._buffer_4h, pd.DataFrame([self._current_4h])], ignore_index=True)
+                else:
+                    # Actualizar la última fila del buffer con los valores actuales de la vela en progreso
+                    if len(self._buffer_4h) > 0:
+                        self._buffer_4h.iloc[-1] = pd.Series(self._current_4h)
 
             # Actualizar 1d
             step_in_1d = step % 24
@@ -229,11 +234,16 @@ class BacktraderReplay:
                     closed_1d = self._current_1d.copy()
                     self._buffer_1d = pd.concat([self._buffer_1d, pd.DataFrame([closed_1d])], ignore_index=True)
 
-                    # Crear nueva vela
+                    # Crear nueva vela con progress inicial
                     if data_idx + 1 < self._total_1h:
                         next_timestamp = self._data_1h.index[data_idx + 1]
                         next_row = self._data_1h.iloc[data_idx + 1]
                         self._current_1d = self._init_1d_candle(next_timestamp, next_row)
+                        self._buffer_1d = pd.concat([self._buffer_1d, pd.DataFrame([self._current_1d])], ignore_index=True)
+                else:
+                    # Actualizar la última fila del buffer con los valores actuales de la vela en progreso
+                    if len(self._buffer_1d) > 0:
+                        self._buffer_1d.iloc[-1] = pd.Series(self._current_1d)
 
             # Log simplificado
             logger.info(
@@ -248,6 +258,8 @@ class BacktraderReplay:
                 "buffer_4h": self._buffer_4h.copy(),
                 "buffer_1d": self._buffer_1d.copy(),
                 "step": step,
+                "progress_4h": progress_4h,
+                "progress_1d": progress_1d,
             }
 
             await asyncio.sleep(delay)

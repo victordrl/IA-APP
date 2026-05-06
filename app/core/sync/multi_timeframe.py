@@ -24,7 +24,9 @@ class MultiTimeframeSync:
 
     _TF_CANONICAL = {"1h": "1h", "4h": "4h", "1d": "1d", "1D": "1d"}
 
-    OHLCV_COLS = ["open", "high", "low", "close", "volume", "progress_vela"]
+    OHLC_COLS = ["open", "high", "low", "close"]
+    VOLUME_PROGRESS_COLS = ["volume", "progress_vela"]
+    OHLCV_COLS = OHLC_COLS + VOLUME_PROGRESS_COLS
 
     GROUPS = {
         "VELOCIDAD": ["MON", "ROC", "RSI_6", "RSI_14", "RSI_24", "RSI_EMA_6", "RSI_EMA_14",
@@ -50,8 +52,8 @@ class MultiTimeframeSync:
             sync_version: "ohlcv" | "indicators" (default from config)
             include_global: add global features (precio_actual, tiempo_normalizado)
         """
-        sync_type = sync_type or settings.sync_type
-        sync_version = sync_version or settings.sync_version
+        sync_type = sync_type or "timeframe"
+        sync_version = sync_version or "ohlcv"
 
         if self._base not in data:
             raise ValueError(f"Base timeframe '{self._base}' not found: {list(data.keys())}")
@@ -59,10 +61,19 @@ class MultiTimeframeSync:
         base_df = data[self._base].copy()
         base_df = base_df.set_index("timestamp").sort_index()
 
+        # Agregar sufijo a TODAS las columnas OHLCV del base timeframe también
+        for col in self.OHLCV_COLS:
+            if col in base_df.columns:
+                base_df = base_df.rename(columns={col: f"{col}_{self._base}"})
+
         for tf, df in data.items():
             canonical = self._TF_CANONICAL.get(tf, tf)
             if canonical != self._base:
                 df_copy = df.copy().set_index("timestamp").sort_index()
+                # Agregar sufijo a las columnas OHLCV para evitar overlap
+                for col in self.OHLCV_COLS:
+                    if col in df_copy.columns:
+                        df_copy = df_copy.rename(columns={col: f"{col}_{canonical}"})
                 df_copy = df_copy.reindex(base_df.index, method="ffill")
                 base_df = base_df.join(df_copy, how="left")
 
@@ -86,85 +97,82 @@ class MultiTimeframeSync:
 
     def _sync_timeframe(self, df: pd.DataFrame, version: str) -> pd.DataFrame:
         """Tipo 1: Cada timeframe con sus indicadores juntos."""
-        result = pd.DataFrame(index=df.index)
+        result_cols = []
 
         for tf in ["1h", "4h", "1d"]:
             tf_cols = [c for c in df.columns if f"_{tf}" in c]
             if not tf_cols:
                 continue
 
-            ohlcv_tf = [c for c in tf_cols if any(c.endswith(f"_{tf}") and c.replace(f"_{tf}", "") in self.OHLCV_COLS)]
-            indicators_tf = [c for c in tf_cols if c not in ohlcv_tf]
+            ohlc_tf = [c for c in tf_cols if c.endswith(f"_{tf}") and c.replace(f"_{tf}", "") in self.OHLC_COLS]
+            vol_prog_tf = [c for c in tf_cols if c.endswith(f"_{tf}") and c.replace(f"_{tf}", "") in self.VOLUME_PROGRESS_COLS]
+            indicators_tf = [c for c in tf_cols if c not in ohlc_tf and c not in vol_prog_tf]
 
             if version == "ohlcv":
-                for col in ohlcv_tf:
-                    result[col] = df[col]
+                result_cols.extend(ohlc_tf)
+                result_cols.extend(vol_prog_tf)
             elif version == "indicators":
-                pass
+                result_cols.extend(vol_prog_tf)
 
-            for col in indicators_tf:
-                result[col] = df[col]
+            result_cols.extend(indicators_tf)
 
         for col in df.columns:
             if not any(f"_{tf}" in col for tf in ["1h", "4h", "1d"]):
-                result[col] = df[col]
+                result_cols.append(col)
 
-        return result
+        return df[result_cols].copy()
 
     def _sync_merged(self, df: pd.DataFrame, version: str) -> pd.DataFrame:
         """Tipo 2: Todos los indicadores juntos sin separación por timeframe."""
-        result = pd.DataFrame(index=df.index)
+        result_cols = []
 
         if version == "ohlcv":
             for tf in ["1h", "4h", "1d"]:
-                ohlcv_cols = [c for c in df.columns if f"_{tf}" in c and any(c.replace(f"_{tf}", "") in self.OHLCV_COLS for _ in [1])]
-                for col in ohlcv_cols:
-                    result[col] = df[col]
-
-        all_indicators = []
-        for tf in ["1h", "4h", "1d"]:
-            tf_indicators = [c for c in df.columns if f"_{tf}" in c and not any(c.replace(f"_{tf}", "") in self.OHLCV_COLS)]
-            all_indicators.extend(tf_indicators)
-
-        for col in all_indicators:
-            indicator_name = col.rsplit("_", 1)[0]
+                ohlcv_cols = [c for c in df.columns if f"_{tf}" in c and c.replace(f"_{tf}", "") in self.OHLCV_COLS]
+                result_cols.extend(ohlcv_cols)
+        elif version == "indicators":
             for tf in ["1h", "4h", "1d"]:
-                full_col = f"{indicator_name}_{tf}"
-                if full_col in df.columns:
-                    result[full_col] = df[full_col]
+                vol_prog_cols = [c for c in df.columns if f"_{tf}" in c and c.replace(f"_{tf}", "") in self.VOLUME_PROGRESS_COLS]
+                result_cols.extend(vol_prog_cols)
+
+        all_indicators = set()
+        for tf in ["1h", "4h", "1d"]:
+            tf_indicators = [c for c in df.columns if f"_{tf}" in c and c.replace(f"_{tf}", "") not in self.OHLC_COLS and c.replace(f"_{tf}", "") not in self.VOLUME_PROGRESS_COLS]
+            all_indicators.update(tf_indicators)
+
+        result_cols.extend(sorted(all_indicators))
 
         for col in df.columns:
-            if col not in result.columns:
-                result[col] = df[col]
+            if col not in result_cols:
+                result_cols.append(col)
 
-        return result
+        return df[result_cols].copy()
 
     def _sync_semantic(self, df: pd.DataFrame, version: str) -> pd.DataFrame:
         """Tipo 3: Por grupos semánticos (VELOCIDAD, TENDENCIA, AMPLITUD, LIQUIDEZ)."""
-        result = pd.DataFrame(index=df.index)
+        result_cols = []
 
         if version == "ohlcv":
             for tf in ["1h", "4h", "1d"]:
-                ohlcv_cols = [c for c in df.columns if f"_{tf}" in c and any(c.replace(f"_{tf}", "") in self.OHLCV_COLS)]
-                for col in ohlcv_cols:
-                    result[col] = df[col]
+                ohlcv_cols = [c for c in df.columns if f"_{tf}" in c and c.replace(f"_{tf}", "") in self.OHLCV_COLS]
+                result_cols.extend(ohlcv_cols)
+        elif version == "indicators":
+            for tf in ["1h", "4h", "1d"]:
+                vol_prog_cols = [c for c in df.columns if f"_{tf}" in c and c.replace(f"_{tf}", "") in self.VOLUME_PROGRESS_COLS]
+                result_cols.extend(vol_prog_cols)
 
         for group_name, indicators in self.GROUPS.items():
-            group_cols = []
             for indicator in indicators:
                 for tf in ["1h", "4h", "1d"]:
                     full_col = f"{indicator}_{tf}"
-                    if full_col in df.columns:
-                        group_cols.append(full_col)
-
-            for col in group_cols:
-                result[col] = df[col]
+                    if full_col in df.columns and full_col not in result_cols:
+                        result_cols.append(full_col)
 
         for col in df.columns:
-            if col not in result.columns:
-                result[col] = df[col]
+            if col not in result_cols:
+                result_cols.append(col)
 
-        return result
+        return df[result_cols].copy()
 
     @staticmethod
     def add_global_features(df: pd.DataFrame) -> pd.DataFrame:
