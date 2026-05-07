@@ -12,8 +12,9 @@ class HistoricalRequest(BaseModel):
     """Parameters for fetching historical OHLCV data."""
     symbol: str = Field("BTC/USDT", description="Trading pair")
     timeframes: list[str] = Field(["1h", "4h", "1d"], description="Candle intervals")
-    since: str | None = Field(None, description="Start date ISO-8601 (e.g. 2024-01-01T00:00:00Z)")
+    since: str | None = Field(None, description="Start date ISO-8601 (e.g. 2026-01-01T00:00:00Z)")
     until: str | None = Field(None, description="End date ISO-8601")
+    include_indicators: bool = Field(False, description="Append technical indicators to the response")
 
 
 class ReplayRequest(BaseModel):

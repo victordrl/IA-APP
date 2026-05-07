@@ -30,8 +30,8 @@ class IndicatorEngine:
         ("RSI_EMA_6", lambda df: ta.momentum.RSIIndicator(df["close"], window=6).rsi().ewm(span=6).mean()),
         ("RSI_EMA_14", lambda df: ta.momentum.RSIIndicator(df["close"], window=14).rsi().ewm(span=14).mean()),
         ("RSI_EMA_24", lambda df: ta.momentum.RSIIndicator(df["close"], window=24).rsi().ewm(span=24).mean()),
-        ("STOCH_K", lambda df: ta.momentum.StochasticOscillator(df["high"], df["low"], df["close"]).stoch()),
-        ("STOCH_D", lambda df: ta.momentum.StochasticOscillator(df["high"], df["low"], df["close"]).stoch_signal()),
+        ("STOCH_K", lambda df: IndicatorEngine._stoch_rsi_k(df, rsi_period=14, stoch_period=14)),
+        ("STOCH_D", lambda df: IndicatorEngine._stoch_rsi_d(df, rsi_period=14, stoch_period=14)),
         ("WILLIAMS_R", lambda df: ta.momentum.WilliamsRIndicator(df["high"], df["low"], df["close"]).williams_r()),
         ("CCI", lambda df: ta.trend.CCIIndicator(df["high"], df["low"], df["close"]).cci()),
     ]
@@ -134,6 +134,24 @@ class IndicatorEngine:
         ema = ta.trend.EMAIndicator(df["close"], window=20).ema_indicator()
         atr = ta.volatility.AverageTrueRange(df["high"], df["low"], df["close"], window=20).average_true_range()
         return ema - (atr * 2)
+
+    @staticmethod
+    def _stoch_rsi_k(df: pd.DataFrame, rsi_period: int = 14, stoch_period: int = 14) -> pd.Series:
+        """Stochastic RSI %K = (RSI - RSI_min) / (RSI_max - RSI_min) * 100"""
+        rsi = ta.momentum.RSIIndicator(df["close"], window=rsi_period).rsi()
+        rsi_min = rsi.rolling(window=stoch_period).min()
+        rsi_max = rsi.rolling(window=stoch_period).max()
+        stoch_rsi = ((rsi - rsi_min) / (rsi_max - rsi_min)) * 100
+        return stoch_rsi
+
+    @staticmethod
+    def _stoch_rsi_d(df: pd.DataFrame, rsi_period: int = 14, stoch_period: int = 14) -> pd.Series:
+        """Stochastic RSI %D = SMA of %K"""
+        rsi = ta.momentum.RSIIndicator(df["close"], window=rsi_period).rsi()
+        rsi_min = rsi.rolling(window=stoch_period).min()
+        rsi_max = rsi.rolling(window=stoch_period).max()
+        stoch_rsi = ((rsi - rsi_min) / (rsi_max - rsi_min)) * 100
+        return stoch_rsi.rolling(window=3).mean()
 
     # ── Public API ───────────────────────────────────────────
 
