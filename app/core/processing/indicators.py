@@ -8,6 +8,7 @@ Organizado por grupos:
 - LIQUIDEZ: CMF, OBV, Elder Ray, EOM, VWAP
 """
 
+import numpy as np
 import pandas as pd
 import ta
 from loguru import logger
@@ -24,14 +25,15 @@ class IndicatorEngine:
     _VELOCIDAD: list[tuple[str, callable]] = [
         ("MON", lambda df: ta.momentum.ROCIndicator(df["close"], window=12).roc()),
         ("ROC", lambda df: ta.momentum.ROCIndicator(df["close"], window=14).roc()),
+        ("SQZ_MOM", lambda df: IndicatorEngine._sqz_mom(df, length=20)),
         ("RSI_6", lambda df: ta.momentum.RSIIndicator(df["close"], window=6).rsi()),
         ("RSI_14", lambda df: ta.momentum.RSIIndicator(df["close"], window=14).rsi()),
         ("RSI_24", lambda df: ta.momentum.RSIIndicator(df["close"], window=24).rsi()),
         ("RSI_EMA_6", lambda df: ta.momentum.RSIIndicator(df["close"], window=6).rsi().ewm(span=6).mean()),
         ("RSI_EMA_14", lambda df: ta.momentum.RSIIndicator(df["close"], window=14).rsi().ewm(span=14).mean()),
         ("RSI_EMA_24", lambda df: ta.momentum.RSIIndicator(df["close"], window=24).rsi().ewm(span=24).mean()),
-        ("STOCH_K", lambda df: IndicatorEngine._stoch_rsi_k(df, rsi_period=14, stoch_period=14)),
-        ("STOCH_D", lambda df: IndicatorEngine._stoch_rsi_d(df, rsi_period=14, stoch_period=14)),
+        ("STOCH_K", lambda df: ta.momentum.StochRSIIndicator(df["close"], window=14, smooth1=3, smooth2=3).stochrsi_k()),
+        ("STOCH_D", lambda df: ta.momentum.StochRSIIndicator(df["close"], window=14, smooth1=3, smooth2=3).stochrsi_d()),
         ("WILLIAMS_R", lambda df: ta.momentum.WilliamsRIndicator(df["high"], df["low"], df["close"]).williams_r()),
         ("CCI", lambda df: ta.trend.CCIIndicator(df["high"], df["low"], df["close"]).cci()),
     ]
@@ -45,9 +47,9 @@ class IndicatorEngine:
         ("ADX", lambda df: ta.trend.ADXIndicator(df["high"], df["low"], df["close"]).adx()),
         ("DI_PLUS", lambda df: ta.trend.ADXIndicator(df["high"], df["low"], df["close"]).adx_pos()),
         ("DI_MINUS", lambda df: ta.trend.ADXIndicator(df["high"], df["low"], df["close"]).adx_neg()),
+        ("EMA_7", lambda df: ta.trend.EMAIndicator(df["close"], window=7).ema_indicator()),
         ("EMA_22", lambda df: ta.trend.EMAIndicator(df["close"], window=22).ema_indicator()),
-        ("EMA_50", lambda df: ta.trend.EMAIndicator(df["close"], window=50).ema_indicator()),
-        ("EMA_100", lambda df: ta.trend.EMAIndicator(df["close"], window=100).ema_indicator()),
+        ("EMA_99", lambda df: ta.trend.EMAIndicator(df["close"], window=99).ema_indicator()),
         ("ICHIMOKU_TENKAN", lambda df: IndicatorEngine._ichimoku_tenkan(df)),
         ("ICHIMOKU_KIJUN", lambda df: IndicatorEngine._ichimoku_kijun(df)),
         ("ICHIMOKU_SA", lambda df: IndicatorEngine._ichimoku_senkou_a(df)),
@@ -136,13 +138,22 @@ class IndicatorEngine:
         return ema - (atr * 2)
 
     @staticmethod
-    def _stoch_rsi_k(df: pd.DataFrame, rsi_period: int = 14, stoch_period: int = 14) -> pd.Series:
-        """Stochastic RSI %K = (RSI - RSI_min) / (RSI_max - RSI_min) * 100"""
-        rsi = ta.momentum.RSIIndicator(df["close"], window=rsi_period).rsi()
-        rsi_min = rsi.rolling(window=stoch_period).min()
-        rsi_max = rsi.rolling(window=stoch_period).max()
-        stoch_rsi = ((rsi - rsi_min) / (rsi_max - rsi_min)) * 100
-        return stoch_rsi
+    def _sqz_mom(df: pd.DataFrame, length: int = 20) -> pd.Series:
+        src = df["close"]
+
+        tr1 = df["high"] - df["low"]
+        tr2 = df["high"] - df["close"].shift()
+        tr3 = df["low"] - df["close"].shift()
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        kc_ma = src.rolling(length).mean()
+        kc_range = tr.rolling(length).mean()
+
+        highest_hl = df["high"].rolling(length).max()
+        lowest_hl = df["low"].rolling(length).min()
+        sma_close = src.rolling(length).mean()
+        midline = (highest_hl + lowest_hl + sma_close) / 3
+
+        return (src - midline).rolling(5).mean()
 
     @staticmethod
     def _stoch_rsi_d(df: pd.DataFrame, rsi_period: int = 14, stoch_period: int = 14) -> pd.Series:
