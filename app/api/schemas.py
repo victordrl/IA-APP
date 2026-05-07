@@ -14,9 +14,6 @@ class HistoricalRequest(BaseModel):
     timeframes: list[str] = Field(["1h", "4h", "1d"], description="Candle intervals")
     since: str | None = Field(None, description="Start date ISO-8601 (e.g. 2024-01-01T00:00:00Z)")
     until: str | None = Field(None, description="End date ISO-8601")
-    sync_type: str | None = Field(None, description="timeframe | merged | semantic (default from config)")
-    sync_version: str | None = Field(None, description="ohlcv | indicators (default from config)")
-    include_sync: bool = Field(False, description="Apply sync to the data")
 
 
 class ReplayRequest(BaseModel):
