@@ -48,10 +48,28 @@ def fetch_historical(req: HistoricalRequest):
 def fetch_realtime(
     symbol: str = "BTC/USDT",
     limit: int = 30,
+    include_indicators: bool = False,
+    timeframes: str = "1h,4h,1d",
 ):
-    """Fetch the latest *limit* candles across all default timeframes."""
+    """Fetch the latest *limit* candles across all default timeframes.
+    
+    Optional: include_indicators=True to append technical indicators (VELOCIDAD,
+    TENDENCIA, AMPLITUD, LIQUIDEZ groups).
+    """
     try:
-        result = _realtime.fetch_latest_multi_timeframe(symbol=symbol, limit=limit)
+        tf_list = [t.strip() for t in timeframes.split(",")]
+        result = _realtime.fetch_latest_multi_timeframe(
+            symbol=symbol, limit=limit, timeframes=tf_list
+        )
+        if include_indicators:
+            result = IndicatorEngine.compute_multi_timeframe(result)
+            return {
+                tf: (
+                    df.replace({float("nan"): None})
+                    .to_dict(orient="records")
+                )
+                for tf, df in result.items()
+            }
         return {tf: df.to_dict(orient="records") for tf, df in result.items()}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))

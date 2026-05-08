@@ -6,12 +6,13 @@ Grupos (uno por ventana):
   2. VELOCIDAD — MON, ROC, RSI, STOCH, WILLIAMS_R, CCI
   3. TENDENCIA — MACD, ADX, EMA, ICHIMOKU
   4. AMPLITUD — Bollinger Bands, Keltner Channel
-  5. LIQUIDEZ — CMF, OBV, ELDER, VWAP, EOM
+  5. LIQUIDEZ — CMF, OBV, ELDER, VWAP, EOM, VOL PROFILE
 
 Usage:
     python tests/test_indicator_visualizer.py
     python tests/test_indicator_visualizer.py --rows 100
-    python tests/test_indicator_visualizer.py --symbol ETH/USDT --since 2026-01-01T00:00:00Z
+    python tests/test_indicator_visualizer.py --mode realtime         # Ultimas 150 velas en tiempo real
+    python tests/test_indicator_visualizer.py --symbol ETH/USDT --mode realtime
 """
 
 import argparse
@@ -67,14 +68,23 @@ COLORS = {
 }
 
 
-def fetch_data(host: str, payload: dict) -> dict:
-    print(f"Llamando {host}/data/historical ...")
-    resp = requests.post(f"{host}/data/historical", json=payload, timeout=60)
-    resp.raise_for_status()
-    data = resp.json()
-    for tf, records in data.items():
-        print(f"  {tf}: {len(records)} velas")
-    return data
+def fetch_data(host: str, mode: str, payload: dict = None, realtime_params: dict = None) -> dict:
+    if mode == "realtime":
+        print(f"Llamando {host}/data/realtime (realtime mode) ...")
+        resp = requests.get(f"{host}/data/realtime", params=realtime_params, timeout=60)
+        resp.raise_for_status()
+        data = resp.json()
+        for tf, records in data.items():
+            print(f"  {tf}: {len(records)} velas")
+        return data
+    else:
+        print(f"Llamando {host}/data/historical ...")
+        resp = requests.post(f"{host}/data/historical", json=payload, timeout=60)
+        resp.raise_for_status()
+        data = resp.json()
+        for tf, records in data.items():
+            print(f"  {tf}: {len(records)} velas")
+        return data
 
 
 def build_dfs(data: dict) -> dict[str, pd.DataFrame]:
@@ -415,26 +425,54 @@ def main():
     parser.add_argument("--since", default="2026-01-01T00:00:00Z")
     parser.add_argument("--until", default="2026-08-07T00:00:00Z")
     parser.add_argument("--rows", type=int, default=80)
+    parser.add_argument("--mode", default="historical", choices=["historical", "realtime"])
     args = parser.parse_args()
 
-    payload = {
-        "symbol": args.symbol,
-        "timeframes": ["1h", "4h", "1d"],
-        "since": args.since,
-        "until": args.until,
-        "include_indicators": True,
-    }
+    if args.mode == "realtime":
+        realtime_params = {
+            "symbol": args.symbol,
+            "limit": 150,
+            "include_indicators": True,
+            "timeframes": "1h,4h,1d",
+        }
+        print(f"Descargando {args.symbol} (realtime, ultimas 150 velas) ...")
+        data = fetch_data(args.host, "realtime", realtime_params=realtime_params)
+        dfs = build_dfs(data)
+        
+        # Compute since/until from actual timestamps
+        if "1h" in dfs and not dfs["1h"].empty:
+            ts = dfs["1h"]["timestamp"]
+            since_calc = ts.min().strftime("%Y-%m-%dT%H:%M:%SZ")
+            until_calc = ts.max().strftime("%Y-%m-%dT%H:%M:%SZ")
+        else:
+            since_calc = "realtime"
+            until_calc = "realtime"
+        
+        n_rows = min(150, len(dfs.get("1h", pd.DataFrame())))
+        print("Abriendo ventanas...")
+        plot_ohlcv_window(dfs, n_rows, args.symbol, since_calc, until_calc)
+        plot_velocidad_window(dfs, n_rows, args.symbol, since_calc, until_calc)
+        plot_tendencia_window(dfs, n_rows, args.symbol, since_calc, until_calc)
+        plot_amplitud_window(dfs, n_rows, args.symbol, since_calc, until_calc)
+        plot_liquidez_window(dfs, n_rows, args.symbol, since_calc, until_calc)
+    else:
+        payload = {
+            "symbol": args.symbol,
+            "timeframes": ["1h", "4h", "1d"],
+            "since": args.since,
+            "until": args.until,
+            "include_indicators": True,
+        }
+        print(f"Descargando {args.symbol} ({args.since} -> {args.until}) ...")
+        data = fetch_data(args.host, "historical", payload=payload)
+        dfs = build_dfs(data)
 
-    print(f"Descargando {args.symbol} ({args.since} -> {args.until}) ...")
-    data = fetch_data(args.host, payload)
-    dfs = build_dfs(data)
-
-    print("Abriendo ventanas...")
-    plot_ohlcv_window(dfs, args.rows, args.symbol, args.since, args.until)
-    plot_velocidad_window(dfs, args.rows, args.symbol, args.since, args.until)
-    plot_tendencia_window(dfs, args.rows, args.symbol, args.since, args.until)
-    plot_amplitud_window(dfs, args.rows, args.symbol, args.since, args.until)
-    plot_liquidez_window(dfs, args.rows, args.symbol, args.since, args.until)
+        print("Abriendo ventanas...")
+        plot_ohlcv_window(dfs, args.rows, args.symbol, args.since, args.until)
+        plot_velocidad_window(dfs, args.rows, args.symbol, args.since, args.until)
+        plot_tendencia_window(dfs, args.rows, args.symbol, args.since, args.until)
+        plot_amplitud_window(dfs, args.rows, args.symbol, args.since, args.until)
+        plot_liquidez_window(dfs, args.rows, args.symbol, args.since, args.until)
 
     print("5 ventanas abiertas — cerralas para terminar.")
     plt.show()
