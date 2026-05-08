@@ -56,37 +56,15 @@ requirements.txt
 requisitos ia 1.docx
 run_visualizer.bat
 run.py
+test_indicators_output.png
 tests/test_api_health.py
+tests/test_indicator_visualizer.py
 tests/test_normalizer.py
 tests/test_replay_visualizer.py
 tests/test_tensor_builder.py
 ```
 
 # Files
-
-## File: .env.example
-`````
-# ── Server ──────────────────────────────────────────
-APP_HOST=0.0.0.0
-APP_PORT=8000
-APP_DEBUG=true
-
-# ── Exchange (CCXT) ─────────────────────────────────
-# No API keys needed for public market data
-EXCHANGE_ID=binance
-EXCHANGE_RATE_LIMIT=true
-
-# ── Data Defaults ───────────────────────────────────
-DEFAULT_SYMBOL=BTC/USDT
-DEFAULT_TIMEFRAMES=1h,4h,1d
-
-# ── Tensor ──────────────────────────────────────────
-TENSOR_WINDOW_SIZE=30
-
-# ── Replay ──────────────────────────────────────────
-REPLAY_SPEED_MULTIPLIER=1.0
-REPLAY_REFRESH_SECONDS=5
-`````
 
 ## File: .gitignore
 `````
@@ -124,100 +102,6 @@ logs/
 # ── OS ──────────────────────────────────────────────
 .DS_Store
 Thumbs.db
-`````
-
-## File: app/api/routes/data.py
-`````python
-"""
-Data endpoints — historical fetch and real-time latest candles.
-Covers RF-3 (historical) and RF-4 (real-time) exposure via API.
-
-Incluye opción de sincronización multi-timeframe:
-- sync_type: timeframe | merged | semantic
-- sync_version: ohlcv | indicators
-"""
-
-from fastapi import APIRouter, HTTPException
-
-from app.api.schemas import HistoricalRequest
-from app.config import settings
-from app.core.data_ingestion.historical import HistoricalDataFetcher
-from app.core.data_ingestion.realtime import RealTimeDataFetcher
-from app.core.processing.indicators import IndicatorEngine
-from app.core.sync.multi_timeframe import MultiTimeframeSync
-
-router = APIRouter(prefix="/data", tags=["Data Ingestion"])
-
-_historical = HistoricalDataFetcher()
-_realtime = RealTimeDataFetcher()
-_sync = MultiTimeframeSync()
-
-
-def _apply_sync(data: dict, sync_type: str, sync_version: str):
-    """Aplicar sync a los datos."""
-    with_indicators = IndicatorEngine.compute_multi_timeframe(data)
-    synced = _sync.synchronize(with_indicators, sync_type=sync_type, sync_version=sync_version)
-    return synced
-
-
-@router.post("/historical")
-def fetch_historical(req: HistoricalRequest):
-    """Fetch historical OHLCV data for the given parameters.
-
-    Returns a dict with timeframe data, optionally synchronized.
-
-    Params:
-        - include_sync: If True, returns synchronized data (single DataFrame)
-        - sync_type: timeframe | merged | semantic (default from config)
-        - sync_version: ohlcv | indicators (default from config)
-    """
-    try:
-        result = _historical.fetch_multi_timeframe(
-            symbol=req.symbol,
-            timeframes=req.timeframes,
-            since=req.since,
-            until=req.until,
-        )
-
-        sync_type = req.sync_type or settings.sync_type
-        sync_version = req.sync_version or settings.sync_version
-
-        if req.include_sync:
-            synced = _apply_sync(result, sync_type, sync_version)
-            return synced.to_dict(orient="records")
-
-        return {tf: df.to_dict(orient="records") for tf, df in result.items()}
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
-
-
-@router.get("/realtime")
-def fetch_realtime(
-    symbol: str = "BTC/USDT",
-    limit: int = 30,
-    sync_type: str = None,
-    sync_version: str = None,
-    include_sync: bool = False,
-):
-    """Fetch the latest *limit* candles across all default timeframes.
-
-    Params:
-        - sync_type: timeframe | merged | semantic (default from config)
-        - sync_version: ohlcv | indicators (default from config)
-        - include_sync: If True, returns synchronized data
-    """
-    try:
-        result = _realtime.fetch_latest_multi_timeframe(symbol=symbol, limit=limit)
-
-        if include_sync:
-            use_sync_type = sync_type or settings.sync_type
-            use_sync_version = sync_version or settings.sync_version
-            synced = _apply_sync(result, use_sync_type, use_sync_version)
-            return synced.to_dict(orient="records")
-
-        return {tf: df.to_dict(orient="records") for tf, df in result.items()}
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
 `````
 
 ## File: app/api/routes/tensor.py
@@ -3876,6 +3760,454 @@ class TestHealthEndpoint:
         assert "version" in body
 `````
 
+## File: tests/test_indicator_visualizer.py
+`````python
+"""
+Indicator Visualizer — Abre una ventana separada por grupo de indicadores.
+
+Grupos (uno por ventana):
+  1. OHLCV — velas 1h / 4h / 1d
+  2. VELOCIDAD — MON, ROC, RSI, STOCH, WILLIAMS_R, CCI
+  3. TENDENCIA — MACD, ADX, EMA, ICHIMOKU
+  4. AMPLITUD — Bollinger Bands, Keltner Channel
+  5. LIQUIDEZ — CMF, OBV, ELDER, VWAP, EOM
+
+Usage:
+    python tests/test_indicator_visualizer.py
+    python tests/test_indicator_visualizer.py --rows 100
+    python tests/test_indicator_visualizer.py --symbol ETH/USDT --since 2026-01-01T00:00:00Z
+"""
+
+import argparse
+import requests
+import pandas as pd
+import numpy as np
+import matplotlib
+matplotlib.use('TkAgg')
+import matplotlib.pyplot as plt
+
+API_BASE = "http://localhost:8000"
+
+COLORS = {
+    "MON": "#FF5722",
+    "ROC": "#03A9F4",
+    "RSI_6": "#FF6B6B",
+    "RSI_14": "#FF9F43",
+    "RSI_24": "#FECA57",
+    "RSI_EMA_6": "#FF6B6B",
+    "RSI_EMA_14": "#FF9F43",
+    "RSI_EMA_24": "#FECA57",
+    "STOCH_K": "#26A69A",
+    "STOCH_D": "#7EC8E3",
+    "WILLIAMS_R": "#9B59B6",
+    "CCI": "#E91E63",
+    "MACD_LINE": "#00BCD4",
+    "MACD_SIGNAL": "#0097A7",
+    "MACD_HIST": "#607D8B",
+    "ADX": "#2196F3",
+    "DI_PLUS": "#4CAF50",
+    "DI_MINUS": "#F44336",
+    "EMA_7": "#FF9800",
+    "EMA_22": "#E65100",
+    "EMA_99": "#BF360C",
+    "ICHIMOKU_TENKAN": "#FF9800",
+    "ICHIMOKU_KIJUN": "#2196F3",
+    "ICHIMOKU_SA": "#9C27B0",
+    "ICHIMOKU_SB": "#3F51B5",
+    "ICHIMOKU_CHIKOU": "#00BCD4",
+    "BB_UPPER": "#8BC34A",
+    "BB_MIDDLE": "#CDDC39",
+    "BB_LOWER": "#8BC34A",
+    "BB_WIDTH": "#689F38",
+    "KELTNER_UPPER": "#795548",
+    "KELTNER_MIDDLE": "#A1887F",
+    "KELTNER_LOWER": "#795548",
+    "CMF": "#607D8B",
+    "OBV": "#9C27B0",
+    "ELDER_BULL": "#4CAF50",
+    "ELDER_BEAR": "#F44336",
+    "VWAP": "#FFEB3B",
+    "EOM": "#9E9E9E",
+}
+
+
+def fetch_data(host: str, payload: dict) -> dict:
+    print(f"Llamando {host}/data/historical ...")
+    resp = requests.post(f"{host}/data/historical", json=payload, timeout=60)
+    resp.raise_for_status()
+    data = resp.json()
+    for tf, records in data.items():
+        print(f"  {tf}: {len(records)} velas")
+    return data
+
+
+def build_dfs(data: dict) -> dict[str, pd.DataFrame]:
+    dfs = {}
+    for tf, records in data.items():
+        df = pd.DataFrame(records)
+        if "timestamp" in df.columns:
+            df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+        suffix = f"_{tf}"
+        rename = {c: c[:-len(suffix)] for c in df.columns if c.endswith(suffix)}
+        if rename:
+            df = df.rename(columns=rename)
+        dfs[tf] = df
+    return dfs
+
+
+def plot_candlestick(ax, df, n_show):
+    ax.clear()
+    if df is None or df.empty:
+        ax.text(0.5, 0.5, "Sin datos", ha="center", va="center", transform=ax.transAxes)
+        return
+    df = df.tail(n_show).reset_index(drop=True)
+    n = len(df)
+    price_range = df["high"].max() - df["low"].min()
+    for i in range(n):
+        row = df.iloc[i]
+        o, h, l, c = row["open"], row["high"], row["low"], row["close"]
+        color = "#26a69a" if c >= o else "#ef5350"
+        ax.plot([i, i], [l, h], color=color, linewidth=0.8)
+        body_bottom = min(o, c)
+        body_height = abs(c - o)
+        if body_height < price_range * 0.005:
+            body_height = price_range * 0.01
+        ax.add_patch(plt.Rectangle((i - 0.35, body_bottom), 0.7, body_height,
+                                   facecolor=color, edgecolor=color, linewidth=0.5))
+    ax.set_xlim(-1, n)
+    ax.grid(True, alpha=0.3)
+
+
+def plot_lines(ax, df, cols, n_show, ylim=None, title=""):
+    ax.clear()
+    for col in cols:
+        if col not in df.columns:
+            continue
+        series = df[col].tail(n_show).dropna()
+        if series.empty:
+            continue
+        color = COLORS.get(col, "#888888")
+        ax.plot(range(len(series)), series.values, color=color, linewidth=1.3, label=col)
+    ax.set_xlim(-1, n_show)
+    if ylim:
+        ax.set_ylim(*ylim)
+    if cols:
+        ax.legend(loc="upper right", fontsize=7)
+    ax.set_title(title, fontsize=9, fontweight="bold")
+    ax.grid(True, alpha=0.25)
+    ax.tick_params(axis="both", labelsize=7)
+
+
+def plot_macd(ax, df, n_show):
+    ax.clear()
+    line = df["MACD_LINE"].tail(n_show).dropna()
+    signal = df["MACD_SIGNAL"].tail(n_show).dropna()
+    hist = df["MACD_HIST"].tail(n_show).dropna()
+
+    if not line.empty:
+        ax.plot(range(len(line)), line.values, color=COLORS["MACD_LINE"], linewidth=1.3, label="MACD")
+    if not signal.empty:
+        ax.plot(range(len(signal)), signal.values, color=COLORS["MACD_SIGNAL"], linewidth=1.3, label="Signal")
+
+    if not hist.empty:
+        x = np.arange(len(hist))
+        pos = hist.values >= 0
+        ax.bar(x[pos], hist.values[pos], color=COLORS["MACD_HIST"], alpha=0.5, width=0.8)
+        neg = hist.values < 0
+        ax.bar(x[neg], hist.values[neg], color="#F44336", alpha=0.5, width=0.8)
+
+    ax.set_xlim(-1, n_show)
+    ax.legend(loc="upper right", fontsize=7)
+    ax.set_title("MACD LINE / SIGNAL / HIST", fontsize=9, fontweight="bold")
+    ax.grid(True, alpha=0.25)
+    ax.tick_params(axis="both", labelsize=7)
+
+
+def plot_ohlcv_window(dfs: dict, n_show: int, symbol: str, since: str, until: str):
+    fig, axs = plt.subplots(3, 1, figsize=(14, 8), sharex=False)
+    fig.canvas.manager.set_window_title("OHLCV — 1h / 4h / 1d")
+    tf_labels = ["1h", "4h", "1d"]
+    for ax, tf in zip(axs, tf_labels):
+        plot_candlestick(ax, dfs.get(tf), n_show)
+        ax.set_ylabel("Price", fontsize=8)
+        ax.set_title(f"{tf.upper()} — BTC/USDT", fontsize=10, fontweight="bold")
+
+        ts = dfs[tf]["timestamp"].tail(n_show) if tf in dfs else []
+        if len(ts) > 0:
+            tick_every = max(1, len(ts) // 8)
+            ticks = range(0, len(ts), tick_every)
+            ax.set_xticks(list(ticks))
+            ax.set_xticklabels([ts.iloc[i].strftime("%m-%d") for i in ticks], rotation=45, fontsize=7)
+
+    fig.suptitle(f"OHLCV — {symbol} | {since[:10]} -> {until[:10]}", fontsize=12, fontweight="bold")
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
+
+
+def plot_sqz_histogram(ax, df, n_show):
+    ax.clear()
+    if "SQZ_MOM" not in df.columns:
+        ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
+        return
+    series = df["SQZ_MOM"].tail(n_show).dropna().reset_index(drop=True)
+    if series.empty:
+        return
+    n = len(series)
+    vals = series.values
+    colors = ["#4CAF50" if v >= 0 else "#FF0000" for v in vals]
+    ax.bar(range(n), vals, color=colors, width=0.8, alpha=0.85)
+    ax.axhline(0, color="gray", linewidth=0.8)
+    ax.set_xlim(-1, n)
+    ymin, ymax = vals.min(), vals.max()
+    if ymin == ymax:
+        ymin, ymax = -1, 1
+    margin = (ymax - ymin) * 0.1
+    ax.set_ylim(ymin - margin, ymax + margin)
+    ax.grid(True, alpha=0.25)
+    ax.tick_params(axis="both", labelsize=7)
+
+
+def plot_velocidad_window(dfs: dict, n_show: int, symbol: str, since: str, until: str):
+    rows = [
+        ("SQZ MOM (histograma)", "sqz", None),
+        ("MON / ROC", ["MON", "ROC"], None),
+        ("RSI (6 / 14 / 24)", ["RSI_6", "RSI_14", "RSI_24"], (0, 100)),
+        ("RSI EMA (6 / 14 / 24)", ["RSI_EMA_6", "RSI_EMA_14", "RSI_EMA_24"], (0, 100)),
+        ("STOCH %K / %D", ["STOCH_K", "STOCH_D"], (0, 1)),
+        ("WILLIAMS %R", ["WILLIAMS_R"], (-100, 0)),
+        ("CCI", ["CCI"], (-200, 200)),
+    ]
+    n_rows = len(rows)
+    fig, axs = plt.subplots(n_rows, 3, figsize=(14, n_rows * 1.8), sharex=False, squeeze=False)
+    fig.canvas.manager.set_window_title("VELOCIDAD — MON, ROC, RSI, STOCH, WILLIAMS, CCI")
+    tf_list = ["1h", "4h", "1d"]
+
+    for row_i, (title, cols, ylim) in enumerate(rows):
+        for ax, tf in zip(axs[row_i], tf_list):
+            df = dfs.get(tf)
+            if df is None:
+                continue
+            if cols == "sqz":
+                plot_sqz_histogram(ax, df, n_show)
+                if row_i == 0:
+                    ax.set_title(f"{tf.upper()} — {title}", fontsize=9, fontweight="bold")
+                ax.tick_params(axis="both", labelsize=7)
+                continue
+            for col in cols:
+                if col not in df.columns:
+                    continue
+                series = df[col].tail(n_show).dropna()
+                if series.empty:
+                    continue
+                color = COLORS.get(col, "#888888")
+                ax.plot(range(len(series)), series.values, color=color, linewidth=1.3, label=col)
+            ax.set_xlim(-1, n_show)
+            if ylim:
+                ax.set_ylim(*ylim)
+                ax.fill_between(range(n_show), ylim[0], ylim[1], alpha=0.05, color="gray")
+            if row_i == 0:
+                ax.set_title(f"{tf.upper()} — {title}", fontsize=9, fontweight="bold")
+            elif tf == "1h":
+                ax.set_ylabel(cols[0], fontsize=7)
+            ax.legend(loc="upper right", fontsize=6)
+            ax.grid(True, alpha=0.25)
+            ax.tick_params(axis="both", labelsize=7)
+            if row_i == n_rows - 1:
+                ts = df["timestamp"].tail(n_show)
+                tick_every = max(1, len(ts) // 8)
+                ticks = list(range(0, len(ts), tick_every))
+                ax.set_xticks(ticks)
+                ax.set_xticklabels([ts.iloc[i].strftime("%m-%d") for i in ticks if i < len(ts)], rotation=45, fontsize=6)
+            else:
+                ax.set_xticklabels([])
+
+    fig.suptitle(f"VELOCIDAD — {symbol} | {since[:10]} -> {until[:10]}", fontsize=12, fontweight="bold")
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+
+
+def plot_tendencia_window(dfs: dict, n_show: int, symbol: str, since: str, until: str):
+    rows = [
+        ("MACD", None),
+        ("ADX / DI+ / DI-", ["ADX", "DI_PLUS", "DI_MINUS"]),
+        ("EMA (7 / 22 / 99)", ["EMA_7", "EMA_22", "EMA_99"]),
+        ("ICHIMOKU TENKAN / KIJUN", ["ICHIMOKU_TENKAN", "ICHIMOKU_KIJUN"]),
+        ("ICHIMOKU SA / SB", ["ICHIMOKU_SA", "ICHIMOKU_SB"]),
+        ("ICHIMOKU CHIKOU", ["ICHIMOKU_CHIKOU"]),
+    ]
+    n_rows = len(rows)
+    fig, axs = plt.subplots(n_rows, 3, figsize=(14, n_rows * 1.8), sharex=False, squeeze=False)
+    fig.canvas.manager.set_window_title("TENDENCIA — MACD, ADX, EMA, ICHIMOKU")
+    tf_list = ["1h", "4h", "1d"]
+
+    for row_i, (title, cols) in enumerate(rows):
+        for ax, tf in zip(axs[row_i], tf_list):
+            df = dfs.get(tf)
+            if df is None:
+                continue
+            if cols is None:
+                plot_macd(ax, df, n_show)
+            else:
+                for col in cols:
+                    if col not in df.columns:
+                        continue
+                    series = df[col].tail(n_show).dropna()
+                    if series.empty:
+                        continue
+                    color = COLORS.get(col, "#888888")
+                    ax.plot(range(len(series)), series.values, color=color, linewidth=1.3, label=col)
+                ax.set_xlim(-1, n_show)
+                ax.legend(loc="upper right", fontsize=6)
+                ax.grid(True, alpha=0.25)
+            if row_i == 0:
+                ax.set_title(f"{tf.upper()} — {title}", fontsize=9, fontweight="bold")
+            elif tf == "1h":
+                ax.set_ylabel(title.split(" ")[0], fontsize=7)
+            ax.tick_params(axis="both", labelsize=7)
+            if row_i == n_rows - 1:
+                ts = df["timestamp"].tail(n_show)
+                tick_every = max(1, len(ts) // 8)
+                ticks = list(range(0, len(ts), tick_every))
+                ax.set_xticks(ticks)
+                ax.set_xticklabels([ts.iloc[i].strftime("%m-%d") for i in ticks if i < len(ts)], rotation=45, fontsize=6)
+            else:
+                ax.set_xticklabels([])
+
+    fig.suptitle(f"TENDENCIA — {symbol} | {since[:10]} -> {until[:10]}", fontsize=12, fontweight="bold")
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+
+
+def plot_amplitud_window(dfs: dict, n_show: int, symbol: str, since: str, until: str):
+    rows = [
+        ("Bollinger Bands — Upper / Middle / Lower", ["BB_UPPER", "BB_MIDDLE", "BB_LOWER"]),
+        ("Bollinger Width", ["BB_WIDTH"], (-0.5, 5)),
+        ("Keltner Channel — Upper / Middle / Lower", ["KELTNER_UPPER", "KELTNER_MIDDLE", "KELTNER_LOWER"]),
+    ]
+    n_rows = len(rows)
+    fig, axs = plt.subplots(n_rows, 3, figsize=(14, n_rows * 2), sharex=False, squeeze=False)
+    fig.canvas.manager.set_window_title("AMPLITUD — Bollinger, Keltner")
+    tf_list = ["1h", "4h", "1d"]
+
+    for row_i, (title, cols, *ylim_extra) in enumerate(rows):
+        ylim = ylim_extra[0] if ylim_extra else None
+        for ax, tf in zip(axs[row_i], tf_list):
+            df = dfs.get(tf)
+            if df is None:
+                continue
+            for col in cols:
+                if col not in df.columns:
+                    continue
+                series = df[col].tail(n_show).dropna()
+                if series.empty:
+                    continue
+                color = COLORS.get(col, "#888888")
+                ax.plot(range(len(series)), series.values, color=color, linewidth=1.3, label=col)
+            ax.set_xlim(-1, n_show)
+            if ylim:
+                ax.set_ylim(*ylim)
+            if row_i == 0:
+                ax.set_title(f"{tf.upper()} — {title}", fontsize=9, fontweight="bold")
+            elif tf == "1h":
+                ax.set_ylabel(cols[0].split("_")[0], fontsize=7)
+            ax.legend(loc="upper right", fontsize=6)
+            ax.grid(True, alpha=0.25)
+            ax.tick_params(axis="both", labelsize=7)
+            if row_i == n_rows - 1:
+                ts = df["timestamp"].tail(n_show)
+                tick_every = max(1, len(ts) // 8)
+                ticks = list(range(0, len(ts), tick_every))
+                ax.set_xticks(ticks)
+                ax.set_xticklabels([ts.iloc[i].strftime("%m-%d") for i in ticks if i < len(ts)], rotation=45, fontsize=6)
+            else:
+                ax.set_xticklabels([])
+
+    fig.suptitle(f"AMPLITUD — {symbol} | {since[:10]} -> {until[:10]}", fontsize=12, fontweight="bold")
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+
+
+def plot_liquidez_window(dfs: dict, n_show: int, symbol: str, since: str, until: str):
+    rows = [
+        ("CMF", ["CMF"], (-1, 1)),
+        ("OBV", ["OBV"], None),
+        ("ELDER BULL / BEAR", ["ELDER_BULL", "ELDER_BEAR"], None),
+        ("VWAP", ["VWAP"], None),
+        ("EOM", ["EOM"], None),
+    ]
+    n_rows = len(rows)
+    fig, axs = plt.subplots(n_rows, 3, figsize=(14, n_rows * 1.8), sharex=False, squeeze=False)
+    fig.canvas.manager.set_window_title("LIQUIDEZ — CMF, OBV, ELDER, VWAP, EOM")
+    tf_list = ["1h", "4h", "1d"]
+
+    for row_i, (title, cols, ylim) in enumerate(rows):
+        for ax, tf in zip(axs[row_i], tf_list):
+            df = dfs.get(tf)
+            if df is None:
+                continue
+            for col in cols:
+                if col not in df.columns:
+                    continue
+                series = df[col].tail(n_show).dropna()
+                if series.empty:
+                    continue
+                color = COLORS.get(col, "#888888")
+                ax.plot(range(len(series)), series.values, color=color, linewidth=1.3, label=col)
+            ax.set_xlim(-1, n_show)
+            if ylim:
+                ax.set_ylim(*ylim)
+            if row_i == 0:
+                ax.set_title(f"{tf.upper()} — {title}", fontsize=9, fontweight="bold")
+            elif tf == "1h":
+                ax.set_ylabel(cols[0], fontsize=7)
+            ax.legend(loc="upper right", fontsize=6)
+            ax.grid(True, alpha=0.25)
+            ax.tick_params(axis="both", labelsize=7)
+            if row_i == n_rows - 1:
+                ts = df["timestamp"].tail(n_show)
+                tick_every = max(1, len(ts) // 8)
+                ticks = list(range(0, len(ts), tick_every))
+                ax.set_xticks(ticks)
+                ax.set_xticklabels([ts.iloc[i].strftime("%m-%d") for i in ticks if i < len(ts)], rotation=45, fontsize=6)
+            else:
+                ax.set_xticklabels([])
+
+    fig.suptitle(f"LIQUIDEZ — {symbol} | {since[:10]} -> {until[:10]}", fontsize=12, fontweight="bold")
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Indicator Visualizer")
+    parser.add_argument("--host", default=API_BASE)
+    parser.add_argument("--symbol", default="BTC/USDT")
+    parser.add_argument("--since", default="2026-01-01T00:00:00Z")
+    parser.add_argument("--until", default="2026-08-07T00:00:00Z")
+    parser.add_argument("--rows", type=int, default=80)
+    args = parser.parse_args()
+
+    payload = {
+        "symbol": args.symbol,
+        "timeframes": ["1h", "4h", "1d"],
+        "since": args.since,
+        "until": args.until,
+        "include_indicators": True,
+    }
+
+    print(f"Descargando {args.symbol} ({args.since} -> {args.until}) ...")
+    data = fetch_data(args.host, payload)
+    dfs = build_dfs(data)
+
+    print("Abriendo ventanas...")
+    plot_ohlcv_window(dfs, args.rows, args.symbol, args.since, args.until)
+    plot_velocidad_window(dfs, args.rows, args.symbol, args.since, args.until)
+    plot_tendencia_window(dfs, args.rows, args.symbol, args.since, args.until)
+    plot_amplitud_window(dfs, args.rows, args.symbol, args.since, args.until)
+    plot_liquidez_window(dfs, args.rows, args.symbol, args.since, args.until)
+
+    print("5 ventanas abiertas — cerralas para terminar.")
+    plt.show()
+
+
+if __name__ == "__main__":
+    main()
+`````
+
 ## File: tests/test_normalizer.py
 `````python
 """
@@ -4306,65 +4638,29 @@ class TestTensorBuilder:
         assert meta["tensor_shape"] == [21, 30, 10]
 `````
 
-## File: app/api/schemas.py
-`````python
-"""
-Pydantic schemas for API request / response models.
-"""
+## File: .env.example
+`````
+# ── Server ──────────────────────────────────────────
+APP_HOST=0.0.0.0
+APP_PORT=8000
+APP_DEBUG=true
 
-from pydantic import BaseModel, Field
+# ── Exchange (CCXT) ─────────────────────────────────
+# No API keys needed for public market data
+EXCHANGE_ID=binance
+EXCHANGE_RATE_LIMIT=true
 
+# ── Data Defaults ───────────────────────────────────
+DEFAULT_SYMBOL=BTC/USDT
+DEFAULT_TIMEFRAMES=1h,4h,1d
 
-# ── Requests ────────────────────────────────────────
+# ── Tensor ──────────────────────────────────────────
+TENSOR_WINDOW_SIZE=100
 
-
-class HistoricalRequest(BaseModel):
-    """Parameters for fetching historical OHLCV data."""
-    symbol: str = Field("BTC/USDT", description="Trading pair")
-    timeframes: list[str] = Field(["1h", "4h", "1d"], description="Candle intervals")
-    since: str | None = Field(None, description="Start date ISO-8601 (e.g. 2024-01-01T00:00:00Z)")
-    until: str | None = Field(None, description="End date ISO-8601")
-    sync_type: str | None = Field(None, description="timeframe | merged | semantic (default from config)")
-    sync_version: str | None = Field(None, description="ohlcv | indicators (default from config)")
-    include_sync: bool = Field(False, description="Apply sync to the data")
-
-
-class ReplayRequest(BaseModel):
-    """Parameters for starting a market replay session."""
-    symbol: str = Field("BTC/USDT")
-    timeframes: list[str] = Field(["1h", "4h", "1d"])
-    since: str | None = Field(None)
-    until: str | None = Field(None)
-    speed_multiplier: float = Field(1.0, ge=0.1, le=100.0)
-    sync_type: str | None = Field(None, description="timeframe | merged | semantic (default from config)")
-    sync_version: str | None = Field(None, description="ohlcv | indicators (default from config)")
-
-
-# ── Responses ───────────────────────────────────────
-
-
-class TensorMeta(BaseModel):
-    """Metadata describing a generated tensor."""
-    window_size: int
-    num_features: int
-    num_rows: int
-    num_windows: int
-    tensor_shape: list[int]
-    feature_columns: list[str]
-
-
-class PipelineStatus(BaseModel):
-    """Current status of the data pipeline."""
-    mode: str  # "idle" | "historical" | "realtime" | "replay"
-    replay_active: bool
-    replay_step: int | None = None
-    replay_total_steps: int | None = None
-
-
-class HealthResponse(BaseModel):
-    """Health-check response."""
-    status: str = "ok"
-    version: str
+# ── Replay ──────────────────────────────────────────
+REPLAY_SPEED_MULTIPLIER=1.0
+REPLAY_REFRESH_SECONDS=5
+REPLAY_INDICATORS_WARMUP=2400
 `````
 
 ## File: app/core/data_ingestion/historical.py
@@ -4756,205 +5052,6 @@ class RealTimeDataFetcher:
 
 `````
 
-## File: app/core/sync/multi_timeframe.py
-`````python
-"""
-RF-7: Multi-timeframe synchronization.
-
-Múltiples modos de sincronización:
-- TYPE 1 (timeframe): 1h|indicadores|4h|indicadores|1d|indicadores
-- TYPE 2 (merged): todos los indicadores juntos sin separación por timeframe
-- TYPE 3 (semantic): por grupos (VELOCIDAD|1h,4h,1d|TENDENCIA|...)
-
-Cada tipo tiene 2 versiones:
-- ohlcv: incluye OHLCV, volume, progress
-- indicators: solo indicadores
-
-Bug fix: sincronización correcta sin reindex/ffill problemático.
-"""
-
-import pandas as pd
-from loguru import logger
-
-from app.config import settings
-
-
-class MultiTimeframeSync:
-    """Synchronize OHLCV DataFrames con múltiples modos y versiones."""
-
-    _TF_CANONICAL = {"1h": "1h", "4h": "4h", "1d": "1d", "1D": "1d"}
-
-    OHLCV_COLS = ["open", "high", "low", "close", "volume", "progress_vela"]
-
-    GROUPS = {
-        "VELOCIDAD": ["MON", "ROC", "RSI_6", "RSI_14", "RSI_24", "RSI_EMA_6", "RSI_EMA_14",
-                     "RSI_EMA_24", "STOCH_K", "STOCH_D", "WILLIAMS_R", "CCI"],
-        "TENDENCIA": ["MACD_LINE", "MACD_SIGNAL", "MACD_HIST", "ADX", "DI_PLUS", "DI_MINUS",
-                     "EMA_22", "EMA_50", "EMA_100", "ICHIMOKU_TENKAN", "ICHIMOKU_KIJUN",
-                     "ICHIMOKU_SA", "ICHIMOKU_SB", "ICHIMOKU_CHIKOU"],
-        "AMPLITUD": ["BB_UPPER", "BB_MIDDLE", "BB_LOWER", "BB_WIDTH",
-                     "KELTNER_UPPER", "KELTNER_MIDDLE", "KELTNER_LOWER"],
-        "LIQUIDEZ": ["CMF", "OBV", "ELDER_BULL", "ELDER_BEAR", "EOM", "VWAP"],
-    }
-
-    def __init__(self, base_timeframe: str = "1h"):
-        self._base = base_timeframe
-
-    def synchronize(self, data: dict[str, pd.DataFrame], sync_type: str = None,
-                    sync_version: str = None, include_global: bool = True) -> pd.DataFrame:
-        """Main synchronization method.
-
-        Args:
-            data: dict with timeframe keys and DataFrame values
-            sync_type: "timeframe" | "merged" | "semantic" (default from config)
-            sync_version: "ohlcv" | "indicators" (default from config)
-            include_global: add global features (precio_actual, tiempo_normalizado)
-        """
-        sync_type = sync_type or settings.sync_type
-        sync_version = sync_version or settings.sync_version
-
-        if self._base not in data:
-            raise ValueError(f"Base timeframe '{self._base}' not found: {list(data.keys())}")
-
-        base_df = data[self._base].copy()
-        base_df = base_df.set_index("timestamp").sort_index()
-
-        for tf, df in data.items():
-            canonical = self._TF_CANONICAL.get(tf, tf)
-            if canonical != self._base:
-                df_copy = df.copy().set_index("timestamp").sort_index()
-                # Agregar sufijo a las columnas OHLCV para evitar overlap
-                for col in self.OHLCV_COLS:
-                    if col in df_copy.columns:
-                        df_copy = df_copy.rename(columns={col: f"{col}_{canonical}"})
-                df_copy = df_copy.reindex(base_df.index, method="ffill")
-                base_df = base_df.join(df_copy, how="left")
-
-        base_df = base_df.ffill()
-
-        result = base_df.copy()
-
-        if sync_type == "timeframe":
-            result = self._sync_timeframe(result, sync_version)
-        elif sync_type == "merged":
-            result = self._sync_merged(result, sync_version)
-        elif sync_type == "semantic":
-            result = self._sync_semantic(result, sync_version)
-        else:
-            raise ValueError(f"Unknown sync_type: {sync_type}")
-
-        if include_global:
-            result = self.add_global_features(result)
-
-        return result
-
-    def _sync_timeframe(self, df: pd.DataFrame, version: str) -> pd.DataFrame:
-        """Tipo 1: Cada timeframe con sus indicadores juntos."""
-        result = pd.DataFrame(index=df.index)
-
-        for tf in ["1h", "4h", "1d"]:
-            tf_cols = [c for c in df.columns if f"_{tf}" in c]
-            if not tf_cols:
-                continue
-
-            ohlcv_tf = [c for c in tf_cols if any(c.endswith(f"_{tf}") and c.replace(f"_{tf}", "") in self.OHLCV_COLS)]
-            indicators_tf = [c for c in tf_cols if c not in ohlcv_tf]
-
-            if version == "ohlcv":
-                for col in ohlcv_tf:
-                    result[col] = df[col]
-            elif version == "indicators":
-                pass
-
-            for col in indicators_tf:
-                result[col] = df[col]
-
-        for col in df.columns:
-            if not any(f"_{tf}" in col for tf in ["1h", "4h", "1d"]):
-                result[col] = df[col]
-
-        return result
-
-    def _sync_merged(self, df: pd.DataFrame, version: str) -> pd.DataFrame:
-        """Tipo 2: Todos los indicadores juntos sin separación por timeframe."""
-        result = pd.DataFrame(index=df.index)
-
-        if version == "ohlcv":
-            for tf in ["1h", "4h", "1d"]:
-                ohlcv_cols = [c for c in df.columns if f"_{tf}" in c and any(c.replace(f"_{tf}", "") in self.OHLCV_COLS for _ in [1])]
-                for col in ohlcv_cols:
-                    result[col] = df[col]
-
-        all_indicators = []
-        for tf in ["1h", "4h", "1d"]:
-            tf_indicators = [c for c in df.columns if f"_{tf}" in c and not any(c.replace(f"_{tf}", "") in self.OHLCV_COLS)]
-            all_indicators.extend(tf_indicators)
-
-        for col in all_indicators:
-            indicator_name = col.rsplit("_", 1)[0]
-            for tf in ["1h", "4h", "1d"]:
-                full_col = f"{indicator_name}_{tf}"
-                if full_col in df.columns:
-                    result[full_col] = df[full_col]
-
-        for col in df.columns:
-            if col not in result.columns:
-                result[col] = df[col]
-
-        return result
-
-    def _sync_semantic(self, df: pd.DataFrame, version: str) -> pd.DataFrame:
-        """Tipo 3: Por grupos semánticos (VELOCIDAD, TENDENCIA, AMPLITUD, LIQUIDEZ)."""
-        result = pd.DataFrame(index=df.index)
-
-        if version == "ohlcv":
-            for tf in ["1h", "4h", "1d"]:
-                ohlcv_cols = [c for c in df.columns if f"_{tf}" in c and any(c.replace(f"_{tf}", "") in self.OHLCV_COLS)]
-                for col in ohlcv_cols:
-                    result[col] = df[col]
-
-        for group_name, indicators in self.GROUPS.items():
-            group_cols = []
-            for indicator in indicators:
-                for tf in ["1h", "4h", "1d"]:
-                    full_col = f"{indicator}_{tf}"
-                    if full_col in df.columns:
-                        group_cols.append(full_col)
-
-            for col in group_cols:
-                result[col] = df[col]
-
-        for col in df.columns:
-            if col not in result.columns:
-                result[col] = df[col]
-
-        return result
-
-    @staticmethod
-    def add_global_features(df: pd.DataFrame) -> pd.DataFrame:
-        """Agregar features globales."""
-        result = df.copy()
-
-        close_1h_col = [c for c in result.columns if c.startswith("close") and "1h" in c]
-        if close_1h_col:
-            result["precio_actual"] = result[close_1h_col[0]]
-
-        if "tiempo_normalizado" not in result.columns:
-            result["tiempo_normalizado"] = result.index.hour / 24.0
-
-        return result
-
-    @staticmethod
-    def get_sync_types() -> list[str]:
-        """Retorna los tipos de sync disponibles."""
-        return ["timeframe", "merged", "semantic"]
-
-    @staticmethod
-    def get_versions() -> list[str]:
-        """Retorna las versiones disponibles."""
-        return ["ohlcv", "indicators"]
-`````
-
 ## File: app/utils/logger.py
 `````python
 """
@@ -5092,6 +5189,334 @@ pytest>=8.0.0
 httpx>=0.28.0
 `````
 
+## File: app/core/sync/multi_timeframe.py
+`````python
+"""
+RF-7: Multi-timeframe synchronization.
+
+Múltiples modos de sincronización:
+- TYPE 1 (timeframe): 1h|indicadores|4h|indicadores|1d|indicadores
+- TYPE 2 (merged): todos los indicadores juntos sin separación por timeframe
+- TYPE 3 (semantic): por grupos (VELOCIDAD|1h,4h,1d|TENDENCIA|...)
+
+Cada tipo tiene 2 versiones:
+- ohlcv: incluye OHLCV, volume, progress
+- indicators: solo indicadores
+
+Bug fix: sincronización correcta sin reindex/ffill problemático.
+"""
+
+import pandas as pd
+from loguru import logger
+
+from app.config import settings
+
+
+class MultiTimeframeSync:
+    """Synchronize OHLCV DataFrames con múltiples modos y versiones."""
+
+    _TF_CANONICAL = {"1h": "1h", "4h": "4h", "1d": "1d", "1D": "1d"}
+
+    OHLC_COLS = ["open", "high", "low", "close"]
+    VOLUME_PROGRESS_COLS = ["volume", "progress_vela"]
+    OHLCV_COLS = OHLC_COLS + VOLUME_PROGRESS_COLS
+
+    GROUPS = {
+        "VELOCIDAD": ["MON", "ROC", "RSI_6", "RSI_14", "RSI_24", "RSI_EMA_6", "RSI_EMA_14",
+                     "RSI_EMA_24", "STOCH_K", "STOCH_D", "WILLIAMS_R", "CCI"],
+        "TENDENCIA": ["MACD_LINE", "MACD_SIGNAL", "MACD_HIST", "ADX", "DI_PLUS", "DI_MINUS",
+                     "EMA_22", "EMA_50", "EMA_100", "ICHIMOKU_TENKAN", "ICHIMOKU_KIJUN",
+                     "ICHIMOKU_SA", "ICHIMOKU_SB", "ICHIMOKU_CHIKOU"],
+        "AMPLITUD": ["BB_UPPER", "BB_MIDDLE", "BB_LOWER", "BB_WIDTH",
+                     "KELTNER_UPPER", "KELTNER_MIDDLE", "KELTNER_LOWER"],
+        "LIQUIDEZ": ["CMF", "OBV", "ELDER_BULL", "ELDER_BEAR", "EOM", "VWAP"],
+    }
+
+    def __init__(self, base_timeframe: str = "1h"):
+        self._base = base_timeframe
+
+    def synchronize(self, data: dict[str, pd.DataFrame], sync_type: str = None,
+                    sync_version: str = None, include_global: bool = True) -> pd.DataFrame:
+        """Main synchronization method.
+
+        Args:
+            data: dict with timeframe keys and DataFrame values
+            sync_type: "timeframe" | "merged" | "semantic" (default from config)
+            sync_version: "ohlcv" | "indicators" (default from config)
+            include_global: add global features (precio_actual, tiempo_normalizado)
+        """
+        sync_type = sync_type or "timeframe"
+        sync_version = sync_version or "ohlcv"
+
+        if self._base not in data:
+            raise ValueError(f"Base timeframe '{self._base}' not found: {list(data.keys())}")
+
+        base_df = data[self._base].copy()
+        base_df = base_df.set_index("timestamp").sort_index()
+
+        # Agregar sufijo a TODAS las columnas OHLCV del base timeframe también
+        for col in self.OHLCV_COLS:
+            if col in base_df.columns:
+                base_df = base_df.rename(columns={col: f"{col}_{self._base}"})
+
+        for tf, df in data.items():
+            canonical = self._TF_CANONICAL.get(tf, tf)
+            if canonical != self._base:
+                df_copy = df.copy().set_index("timestamp").sort_index()
+                # Agregar sufijo a las columnas OHLCV para evitar overlap
+                for col in self.OHLCV_COLS:
+                    if col in df_copy.columns:
+                        df_copy = df_copy.rename(columns={col: f"{col}_{canonical}"})
+                df_copy = df_copy.reindex(base_df.index, method="ffill")
+                base_df = base_df.join(df_copy, how="left")
+
+        base_df = base_df.ffill()
+
+        result = base_df.copy()
+
+        if sync_type == "timeframe":
+            result = self._sync_timeframe(result, sync_version)
+        elif sync_type == "merged":
+            result = self._sync_merged(result, sync_version)
+        elif sync_type == "semantic":
+            result = self._sync_semantic(result, sync_version)
+        else:
+            raise ValueError(f"Unknown sync_type: {sync_type}")
+
+        if include_global:
+            result = self.add_global_features(result)
+
+        return result
+
+    def _sync_timeframe(self, df: pd.DataFrame, version: str) -> pd.DataFrame:
+        """Tipo 1: Cada timeframe con sus indicadores juntos."""
+        result_cols = []
+
+        for tf in ["1h", "4h", "1d"]:
+            tf_cols = [c for c in df.columns if f"_{tf}" in c]
+            if not tf_cols:
+                continue
+
+            ohlc_tf = [c for c in tf_cols if c.endswith(f"_{tf}") and c.replace(f"_{tf}", "") in self.OHLC_COLS]
+            vol_prog_tf = [c for c in tf_cols if c.endswith(f"_{tf}") and c.replace(f"_{tf}", "") in self.VOLUME_PROGRESS_COLS]
+            indicators_tf = [c for c in tf_cols if c not in ohlc_tf and c not in vol_prog_tf]
+
+            if version == "ohlcv":
+                result_cols.extend(ohlc_tf)
+                result_cols.extend(vol_prog_tf)
+            elif version == "indicators":
+                result_cols.extend(vol_prog_tf)
+
+            result_cols.extend(indicators_tf)
+
+        for col in df.columns:
+            if not any(f"_{tf}" in col for tf in ["1h", "4h", "1d"]):
+                result_cols.append(col)
+
+        return df[result_cols].copy()
+
+    def _sync_merged(self, df: pd.DataFrame, version: str) -> pd.DataFrame:
+        """Tipo 2: Todos los indicadores juntos sin separación por timeframe."""
+        result_cols = []
+
+        if version == "ohlcv":
+            for tf in ["1h", "4h", "1d"]:
+                ohlcv_cols = [c for c in df.columns if f"_{tf}" in c and c.replace(f"_{tf}", "") in self.OHLCV_COLS]
+                result_cols.extend(ohlcv_cols)
+        elif version == "indicators":
+            for tf in ["1h", "4h", "1d"]:
+                vol_prog_cols = [c for c in df.columns if f"_{tf}" in c and c.replace(f"_{tf}", "") in self.VOLUME_PROGRESS_COLS]
+                result_cols.extend(vol_prog_cols)
+
+        all_indicators = set()
+        for tf in ["1h", "4h", "1d"]:
+            tf_indicators = [c for c in df.columns if f"_{tf}" in c and c.replace(f"_{tf}", "") not in self.OHLC_COLS and c.replace(f"_{tf}", "") not in self.VOLUME_PROGRESS_COLS]
+            all_indicators.update(tf_indicators)
+
+        result_cols.extend(sorted(all_indicators))
+
+        for col in df.columns:
+            if col not in result_cols:
+                result_cols.append(col)
+
+        return df[result_cols].copy()
+
+    def _sync_semantic(self, df: pd.DataFrame, version: str) -> pd.DataFrame:
+        """Tipo 3: Por grupos semánticos (VELOCIDAD, TENDENCIA, AMPLITUD, LIQUIDEZ)."""
+        result_cols = []
+
+        if version == "ohlcv":
+            for tf in ["1h", "4h", "1d"]:
+                ohlcv_cols = [c for c in df.columns if f"_{tf}" in c and c.replace(f"_{tf}", "") in self.OHLCV_COLS]
+                result_cols.extend(ohlcv_cols)
+        elif version == "indicators":
+            for tf in ["1h", "4h", "1d"]:
+                vol_prog_cols = [c for c in df.columns if f"_{tf}" in c and c.replace(f"_{tf}", "") in self.VOLUME_PROGRESS_COLS]
+                result_cols.extend(vol_prog_cols)
+
+        for group_name, indicators in self.GROUPS.items():
+            for indicator in indicators:
+                for tf in ["1h", "4h", "1d"]:
+                    full_col = f"{indicator}_{tf}"
+                    if full_col in df.columns and full_col not in result_cols:
+                        result_cols.append(full_col)
+
+        for col in df.columns:
+            if col not in result_cols:
+                result_cols.append(col)
+
+        return df[result_cols].copy()
+
+    @staticmethod
+    def add_global_features(df: pd.DataFrame) -> pd.DataFrame:
+        """Agregar features globales."""
+        result = df.copy()
+
+        close_1h_col = [c for c in result.columns if c.startswith("close") and "1h" in c]
+        if close_1h_col:
+            result["precio_actual"] = result[close_1h_col[0]]
+
+        if "tiempo_normalizado" not in result.columns:
+            result["tiempo_normalizado"] = result.index.hour / 24.0
+
+        return result
+
+    @staticmethod
+    def get_sync_types() -> list[str]:
+        """Retorna los tipos de sync disponibles."""
+        return ["timeframe", "merged", "semantic"]
+
+    @staticmethod
+    def get_versions() -> list[str]:
+        """Retorna las versiones disponibles."""
+        return ["ohlcv", "indicators"]
+`````
+
+## File: app/core/tensor/builder.py
+`````python
+
+`````
+
+## File: app/main.py
+`````python
+"""
+IA-APP — FastAPI Application Entry Point.
+
+Initializes the server, registers all routes, and configures
+middleware.  Covers RF-2 (Backend Initialization).
+"""
+
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from app.config import __version__
+from app.api.routes import data, replay  # tensor deshabilitado
+from app.api.schemas import HealthResponse
+from app.utils.logger import setup_logging
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan — startup & shutdown hooks."""
+    setup_logging()
+    yield
+
+
+app = FastAPI(
+    title="IA-APP — AI Trading Data Pipeline",
+    description=(
+        "Fase 1: Infraestructura, Servidor y Pipeline de Datos. "
+        "Obtiene, sincroniza, normaliza y entrega tensores de mercado "
+        "multi-temporalidad (1h, 4h, 1d) listos para redes neuronales."
+    ),
+    version=__version__,
+    lifespan=lifespan,
+)
+
+# ── CORS ────────────────────────────────────────────
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ── Routes ──────────────────────────────────────────
+app.include_router(data.router)
+app.include_router(replay.router)
+# app.include_router(tensor.router)  # deshabilitado
+
+
+# ── Health ──────────────────────────────────────────
+@app.get("/health", response_model=HealthResponse, tags=["System"])
+def health_check():
+    """Endpoint de salud del servidor."""
+    return HealthResponse(status="ok", version=__version__)
+`````
+
+## File: app/api/routes/data.py
+`````python
+"""
+Data endpoints — historical fetch and real-time latest candles.
+Covers RF-3 (historical) and RF-4 (real-time) exposure via API.
+"""
+
+from fastapi import APIRouter, HTTPException
+
+from app.api.schemas import HistoricalRequest
+from app.core.data_ingestion.historical import HistoricalDataFetcher
+from app.core.data_ingestion.realtime import RealTimeDataFetcher
+from app.core.processing.indicators import IndicatorEngine
+
+router = APIRouter(prefix="/data", tags=["Data Ingestion"])
+
+_historical = HistoricalDataFetcher()
+_realtime = RealTimeDataFetcher()
+
+
+@router.post("/historical")
+def fetch_historical(req: HistoricalRequest):
+    """Fetch historical OHLCV data, optionally with technical indicators.
+
+    If include_indicators=True, appends ~40 indicators per timeframe
+    (VELOCIDAD, TENDENCIA, AMPLITUD, LIQUIDEZ groups).
+    NaN values appear where the lookback window is insufficient.
+    """
+    try:
+        result = _historical.fetch_multi_timeframe(
+            symbol=req.symbol,
+            timeframes=req.timeframes,
+            since=req.since,
+            until=req.until,
+        )
+        if req.include_indicators:
+            result = IndicatorEngine.compute_multi_timeframe(result)
+        return {
+            tf: (
+                df.replace({float("nan"): None})
+                .to_dict(orient="records")
+            )
+            for tf, df in result.items()
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.get("/realtime")
+def fetch_realtime(
+    symbol: str = "BTC/USDT",
+    limit: int = 30,
+):
+    """Fetch the latest *limit* candles across all default timeframes."""
+    try:
+        result = _realtime.fetch_latest_multi_timeframe(symbol=symbol, limit=limit)
+        return {tf: df.to_dict(orient="records") for tf, df in result.items()}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+`````
+
 ## File: app/config.py
 `````python
 """
@@ -5134,12 +5559,6 @@ class Settings(BaseSettings):
     replay_speed_multiplier: float = 1.0
     replay_refresh_seconds: float = 5.0
     replay_indicators_warmup: int = 2400  # ~100 días de 1h para indicadores completos
-
-    # ── Sync ──────────────────────────────────────────
-    # Tipos: "timeframe" | "merged" | "semantic"
-    sync_type: str = "timeframe"
-    # Versión: "ohlcv" | "indicators"
-    sync_version: str = "indicators"
 
     @property
     def timeframes_list(self) -> list[str]:
@@ -5235,10 +5654,6 @@ class BacktraderReplay:
         self._current_4h = self._init_4h_candle(first_replay_idx, first_row)
         self._current_1d = self._init_1d_candle(first_replay_idx, first_row)
 
-        # Agregar vela en progreso actual al buffer para visualización
-        self._buffer_4h = pd.concat([self._buffer_4h, pd.DataFrame([self._current_4h])], ignore_index=True)
-        self._buffer_1d = pd.concat([self._buffer_1d, pd.DataFrame([self._current_1d])], ignore_index=True)
-
         logger.info(
             "BacktraderReplay initialized — warmup={} (~100 days), steps={}, total_1h={}",
             self._warmup_end,
@@ -5318,6 +5733,10 @@ class BacktraderReplay:
         self._active = True
         delay = self._refresh / self._speed
 
+        # Agregar las velas en progreso actuales al buffer
+        self._buffer_4h = pd.concat([self._buffer_4h, pd.DataFrame([self._current_4h])], ignore_index=True)
+        self._buffer_1d = pd.concat([self._buffer_1d, pd.DataFrame([self._current_1d])], ignore_index=True)
+
         # El replay starts desde warmup_end
         for step in range(self._max_steps):
             if not self._active:
@@ -5359,11 +5778,16 @@ class BacktraderReplay:
                     closed_4h = self._current_4h.copy()
                     self._buffer_4h = pd.concat([self._buffer_4h, pd.DataFrame([closed_4h])], ignore_index=True)
 
-                    # Crear nueva vela
+                    # Crear nueva vela con progress inicial
                     if data_idx + 1 < self._total_1h:
                         next_timestamp = self._data_1h.index[data_idx + 1]
                         next_row = self._data_1h.iloc[data_idx + 1]
                         self._current_4h = self._init_4h_candle(next_timestamp, next_row)
+                        self._buffer_4h = pd.concat([self._buffer_4h, pd.DataFrame([self._current_4h])], ignore_index=True)
+                else:
+                    # Actualizar la última fila del buffer con los valores actuales de la vela en progreso
+                    if len(self._buffer_4h) > 0:
+                        self._buffer_4h.iloc[-1] = pd.Series(self._current_4h)
 
             # Actualizar 1d
             step_in_1d = step % 24
@@ -5383,11 +5807,16 @@ class BacktraderReplay:
                     closed_1d = self._current_1d.copy()
                     self._buffer_1d = pd.concat([self._buffer_1d, pd.DataFrame([closed_1d])], ignore_index=True)
 
-                    # Crear nueva vela
+                    # Crear nueva vela con progress inicial
                     if data_idx + 1 < self._total_1h:
                         next_timestamp = self._data_1h.index[data_idx + 1]
                         next_row = self._data_1h.iloc[data_idx + 1]
                         self._current_1d = self._init_1d_candle(next_timestamp, next_row)
+                        self._buffer_1d = pd.concat([self._buffer_1d, pd.DataFrame([self._current_1d])], ignore_index=True)
+                else:
+                    # Actualizar la última fila del buffer con los valores actuales de la vela en progreso
+                    if len(self._buffer_1d) > 0:
+                        self._buffer_1d.iloc[-1] = pd.Series(self._current_1d)
 
             # Log simplificado
             logger.info(
@@ -5402,6 +5831,8 @@ class BacktraderReplay:
                 "buffer_4h": self._buffer_4h.copy(),
                 "buffer_1d": self._buffer_1d.copy(),
                 "step": step,
+                "progress_4h": progress_4h,
+                "progress_1d": progress_1d,
             }
 
             await asyncio.sleep(delay)
@@ -5422,6 +5853,417 @@ class BacktraderReplay:
         return self._max_steps
 `````
 
+## File: app/api/routes/replay.py
+`````python
+"""
+Replay endpoints — start, stop, and status of market replay sessions.
+Covers RF-5 (Market Replay) exposure via API.
+
+Usa BacktraderReplay con buffers dinámicos:
+- buffer_1h: todas las velas 1h acumuladas (warmup + progresivas)
+- buffer_4h: velas 4h (cerradas + en progreso)
+- buffer_1d: velas 1d (cerradas + en progreso)
+
+El replay usa TODOS los datos acumulados para indicadores.
+"""
+
+import asyncio
+import traceback
+
+from fastapi import APIRouter, HTTPException
+import pandas as pd
+
+from app.api.schemas import PipelineStatus, ReplayRequest, ReplayConfigRequest
+from app.config import settings
+from app.core.data_ingestion.historical import HistoricalDataFetcher
+from app.core.data_ingestion.replay_backtrader import BacktraderReplay
+from app.core.processing.indicators import IndicatorEngine
+from app.core.sync.multi_timeframe import MultiTimeframeSync
+
+router = APIRouter(prefix="/replay", tags=["Market Replay"])
+
+_historical = HistoricalDataFetcher()
+_sync = MultiTimeframeSync()
+
+_current_replay: BacktraderReplay | None = None
+_current_step: int = 0
+_replay_active: bool = False
+_current_sync_type = "timeframe"
+_current_sync_version = "indicators"
+
+
+@router.post("/start")
+async def start_replay(req: ReplayRequest):
+    """Start a new market replay session.
+
+    Fetch 1h del rango especificado (since - until).
+    Por cada step:
+    - Agregar vela 1h al buffer
+    - Reconstruir 4h (cierra cada 4 steps)
+    - Reconstruir 1d (cierra cada 24 steps)
+    - Calcular indicadores con TODOS los datos acumulados
+    - sincronizar timeframes
+
+    El replay es indefinido - recorre todos los datos del rango.
+    """
+    global _current_replay, _current_step, _replay_active, _current_sync_type, _current_sync_version
+
+    if _current_replay and _current_replay.is_active:
+        raise HTTPException(status_code=409, detail="Replay already running — stop it first")
+
+    try:
+        since = req.since or (req.until if req.until else None)
+        until = req.until
+
+        # Fetch 1h del rango completo
+        raw_1h = _historical.fetch(
+            symbol=req.symbol,
+            timeframe="1h",
+            since=since,
+            until=until,
+        )
+
+        min_required = settings.replay_indicators_warmup + 1
+        if len(raw_1h) < min_required:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Insufficient data: {len(raw_1h)} rows. Need at least {min_required} (~{min_required//24} days). "
+                f"Indicators warmup uses {settings.replay_indicators_warmup} rows (~{settings.replay_indicators_warmup//24} days). "
+                f"This leaves {len(raw_1h) - settings.replay_indicators_warmup} replay steps."
+            )
+
+        # Crear replay con warmup de 2400 datos para indicadores completos
+        _current_replay = BacktraderReplay(
+            data_1h=raw_1h,
+            window_size=settings.tensor_window_size,
+            speed_multiplier=req.speed_multiplier,
+            refresh_seconds=settings.replay_refresh_seconds,
+        )
+        _current_step = 0
+        _replay_active = True
+
+        # Validar sync_type y sync_version - defaults: timeframe + ohlcv
+        valid_sync_types = ["timeframe", "merged", "semantic"]
+        valid_sync_versions = ["ohlcv", "indicators"]
+        _current_sync_type = req.sync_type if req.sync_type in valid_sync_types else "timeframe"
+        _current_sync_version = req.sync_version if req.sync_version in valid_sync_versions else "ohlcv"
+
+        asyncio.create_task(_run_replay())
+
+        return {
+            "status": "started",
+            "total_steps": _current_replay.total_steps,
+            "speed": req.speed_multiplier,
+            "warmup_1h_rows": settings.replay_indicators_warmup,
+            "warmup_days": settings.replay_indicators_warmup // 24,
+            "total_1h_data": len(raw_1h),
+            "replay_start_date": str(_current_replay.first_step_date),
+            "sync_type": _current_sync_type,
+            "sync_version": _current_sync_version,
+            "note": f"Indicators warmup uses {settings.replay_indicators_warmup} rows (~100 days). Step 1 starts at: {_current_replay.first_step_date}",
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.post("/stop")
+def stop_replay():
+    """Stop the currently running replay."""
+    global _current_replay, _replay_active
+    if _current_replay:
+        _current_replay.stop()
+        _replay_active = False
+        return {
+            "status": "stopped",
+            "step": _current_step,
+        }
+    return {"status": "no_replay_running"}
+
+
+@router.get("/status", response_model=PipelineStatus)
+def replay_status():
+    """Return the current replay status."""
+    return PipelineStatus(
+        mode="replay" if _replay_active else "idle",
+        replay_active=_replay_active,
+        replay_step=_current_step if _replay_active else None,
+        replay_total_steps=_current_replay.total_steps if _current_replay else None,
+        sync_type=_current_sync_type,
+        sync_version=_current_sync_version,
+    )
+
+
+@router.patch("/config")
+def update_replay_config(config: ReplayConfigRequest):
+    """Actualizar sync_type y sync_version durante replay activo."""
+    global _current_sync_type, _current_sync_version
+
+    valid_sync_types = ["timeframe", "merged", "semantic"]
+    valid_sync_versions = ["ohlcv", "indicators"]
+
+    if config.sync_type and config.sync_type in valid_sync_types:
+        _current_sync_type = config.sync_type
+    if config.sync_version and config.sync_version in valid_sync_versions:
+        _current_sync_version = config.sync_version
+
+    return {
+        "status": "updated",
+        "sync_type": _current_sync_type,
+        "sync_version": _current_sync_version,
+    }
+
+
+async def _run_replay():
+    """Consume the replay stream and process with indicators."""
+    global _current_step, _replay_active, _current_sync_type, _current_sync_version
+
+    if not _current_replay:
+        return
+
+    # Asegurar valores por defecto del sync - solo si no son valores válidos
+    valid_sync_types = ["timeframe", "merged", "semantic"]
+    valid_sync_versions = ["ohlcv", "indicators"]
+    if _current_sync_type not in valid_sync_types:
+        _current_sync_type = "timeframe"
+    if _current_sync_version not in valid_sync_versions:
+        _current_sync_version = "ohlcv"
+
+    # Mensaje de inicio con fecha exacta
+    first_date = _current_replay.first_step_date
+    window_size = settings.tensor_window_size
+    window_end = first_date + pd.Timedelta(hours=window_size)
+
+    logger.info("=== REPLAY START ===")
+    logger.info("Total steps: {}".format(_current_replay.total_steps))
+    logger.info("Warmup rows: {} (~100 days)".format(settings.replay_indicators_warmup))
+    logger.info("Step 1 starts at: {}".format(first_date))
+    logger.info("Window size: {} hours".format(window_size))
+    logger.info("First window (100 steps): {} to {}".format(first_date, window_end))
+    logger.info("Sync type: {} (version: {})".format(_current_sync_type, _current_sync_version))
+    logger.info("=" * 40)
+
+    try:
+        async for window in _current_replay.stream():
+            if not _replay_active:
+                break
+
+            step = window["step"]
+            _current_step = step + 1
+
+            try:
+                buffers = {
+                    "1h": window["buffer_1h"],
+                    "4h": window["buffer_4h"],
+                    "1d": window["buffer_1d"],
+                }
+
+                # Obtener datos DIRECTAMENTE de los buffers - NO del sync
+                buf_1h = buffers["1h"]
+                buf_4h = buffers["4h"]
+                buf_1d = buffers["1d"]
+
+                last_1h = buf_1h.iloc[-1].to_dict() if not buf_1h.empty else {}
+                last_4h = buf_4h.iloc[-1].to_dict() if not buf_4h.empty else {}
+                last_1d = buf_1d.iloc[-1].to_dict() if not buf_1d.empty else {}
+
+                progress_4h = window.get("progress_4h", 0.0)
+                progress_1d = window.get("progress_1d", 0.0)
+
+                # Log de reconstrucción - usando valores de los buffers directamente
+                logger.info("=== Step {} ===".format(step))
+                logger.info("1h: O:{:.2f} H:{:.2f} L:{:.2f} C:{:.2f} V:{:.0f} P:{:.2f}".format(
+                    last_1h.get("open", 0),
+                    last_1h.get("high", 0),
+                    last_1h.get("low", 0),
+                    last_1h.get("close", 0),
+                    last_1h.get("volume", 0),
+                    last_1h.get("progress_vela", 1.0),
+                ))
+                logger.info("4h: O:{:.2f} H:{:.2f} L:{:.2f} C:{:.2f} V:{:.0f} P:{:.2f}".format(
+                    last_4h.get("open", 0),
+                    last_4h.get("high", 0),
+                    last_4h.get("low", 0),
+                    last_4h.get("close", 0),
+                    last_4h.get("volume", 0),
+                    progress_4h,
+                ))
+                logger.info("1d: O:{:.2f} H:{:.2f} L:{:.2f} C:{:.2f} V:{:.0f} P:{:.2f}".format(
+                    last_1d.get("open", 0),
+                    last_1d.get("high", 0),
+                    last_1d.get("low", 0),
+                    last_1d.get("close", 0),
+                    last_1d.get("volume", 0),
+                    progress_1d,
+                ))
+
+                # Sincronizar para uso interno (tensor)
+                # Debug: mostrar tamaño de buffers antes del sync
+                # logger.debug("Before sync - buffers: 1h:{}, 4h:{}, 1d:{}".format(
+                #     len(buffers["1h"]), len(buffers["4h"]), len(buffers["1d"])))
+
+                try:
+                    with_indicators = IndicatorEngine.compute_multi_timeframe(buffers)
+                    synced = _sync.synchronize(
+                        with_indicators,
+                        sync_type=_current_sync_type,
+                        sync_version=_current_sync_version
+                    )
+                    synced = MultiTimeframeSync.add_global_features(synced)
+
+                    logger.debug("Sync completed - shape: {}".format(synced.shape))
+
+                    if synced.empty:
+                        logger.warning("Sync returned empty DataFrame")
+                        continue
+
+                except Exception as sync_error:
+                    logger.error("Sync failed at step {}: {}\n{}", _current_step, sync_error, traceback.format_exc())
+                    continue
+
+                last_row = synced.iloc[-1].round(2)
+
+                OHLC_COLS = ["open", "high", "low", "close"]
+                VOL_PROG_COLS = ["volume", "progress_vela"]
+
+                if _current_sync_type == "timeframe":
+                    logger.info("=== SYNC TIMEFRAME (ver:{}) | rows:{} | cols:{} ===".format(
+                        _current_sync_version, synced.shape[0], synced.shape[1]))
+
+                    for tf in ["1h", "4h", "1d"]:
+                        cols_line = []
+                        for col in last_row.index:
+                            if f"_{tf}" in col and pd.notna(last_row[col]):
+                                short_col = col.replace(f"_{tf}", "")
+                                if _current_sync_version == "ohlcv" or short_col not in OHLC_COLS:
+                                    cols_line.append("{}:{}".format(short_col, last_row[col]))
+                        logger.info("{}: | {} |".format(tf, " | ".join(cols_line)))
+
+                elif _current_sync_type == "merged":
+                    logger.info("=== SYNC MERGED (ver:{}) | rows:{} | cols:{} ===".format(
+                        _current_sync_version, synced.shape[0], synced.shape[1]))
+
+                    cols_line = []
+                    for col in last_row.index:
+                        if pd.notna(last_row[col]):
+                            short_col = col.split("_")[0] if "_" in col else col
+                            if _current_sync_version == "ohlcv" or short_col not in OHLC_COLS:
+                                cols_line.append("{}:{}".format(col, last_row[col]))
+                    logger.info("| {} |".format(" | ".join(cols_line)))
+
+                elif _current_sync_type == "semantic":
+                    logger.info("=== SYNC SEMANTIC (ver:{}) | rows:{} | cols:{} ===".format(
+                        _current_sync_version, synced.shape[0], synced.shape[1]))
+
+                    GROUPS = {
+                        "VELOCIDAD": ["MON", "ROC", "RSI_6", "RSI_14", "RSI_24", "RSI_EMA_6", "RSI_EMA_14", "RSI_EMA_24", "STOCH_K", "STOCH_D", "WILLIAMS_R", "CCI"],
+                        "TENDENCIA": ["MACD_LINE", "MACD_SIGNAL", "MACD_HIST", "ADX", "DI_PLUS", "DI_MINUS", "EMA_22", "EMA_50", "EMA_100", "ICHIMOKU_TENKAN", "ICHIMOKU_KIJUN", "ICHIMOKU_SA", "ICHIMOKU_SB", "ICHIMOKU_CHIKOU"],
+                        "AMPLITUD": ["BB_UPPER", "BB_MIDDLE", "BB_LOWER", "BB_WIDTH", "KELTNER_UPPER", "KELTNER_MIDDLE", "KELTNER_LOWER"],
+                        "LIQUIDEZ": ["CMF", "OBV", "ELDER_BULL", "ELDER_BEAR", "EOM", "VWAP"],
+                    }
+
+                    for group_name, indicators in GROUPS.items():
+                        cols_line = []
+                        for tf in ["1h", "4h", "1d"]:
+                            if _current_sync_version == "ohlcv":
+                                for col in OHLC_COLS + VOL_PROG_COLS:
+                                    full_col = "{}_{}".format(col, tf)
+                                    if full_col in last_row.index and pd.notna(last_row[full_col]):
+                                        cols_line.append("{}:{}".format(full_col, last_row[full_col]))
+                            else:
+                                for col in VOL_PROG_COLS:
+                                    full_col = "{}_{}".format(col, tf)
+                                    if full_col in last_row.index and pd.notna(last_row[full_col]):
+                                        cols_line.append("{}:{}".format(full_col, last_row[full_col]))
+                        for ind in indicators:
+                            for tf in ["1h", "4h", "1d"]:
+                                col = "{}_{}".format(ind, tf)
+                                if col in last_row.index and pd.notna(last_row[col]):
+                                    cols_line.append("{}:{}".format(col, last_row[col]))
+                        logger.info("{}: | {} |".format(group_name, " | ".join(cols_line)))
+
+            except Exception as e:
+                logger.error("Error at step {}: {}", _current_step, e)
+
+        _replay_active = False
+        logger.success("Replay finished — {} steps completed".format(_current_step))
+
+    except Exception as e:
+        logger.error("Replay error: {}", e)
+        _replay_active = False
+
+
+from loguru import logger
+`````
+
+## File: app/api/schemas.py
+`````python
+"""
+Pydantic schemas for API request / response models.
+"""
+
+from pydantic import BaseModel, Field
+
+
+# ── Requests ────────────────────────────────────────
+
+
+class HistoricalRequest(BaseModel):
+    """Parameters for fetching historical OHLCV data."""
+    symbol: str = Field("BTC/USDT", description="Trading pair")
+    timeframes: list[str] = Field(["1h", "4h", "1d"], description="Candle intervals")
+    since: str | None = Field(None, description="Start date ISO-8601 (e.g. 2026-01-01T00:00:00Z)")
+    until: str | None = Field(None, description="End date ISO-8601")
+    include_indicators: bool = Field(False, description="Append technical indicators to the response")
+
+
+class ReplayRequest(BaseModel):
+    """Parameters for starting a market replay session."""
+    symbol: str = Field("BTC/USDT")
+    timeframes: list[str] = Field(["1h", "4h", "1d"])
+    since: str | None = Field(None)
+    until: str | None = Field(None)
+    speed_multiplier: float = Field(1.0, ge=0.1, le=100.0)
+    sync_type: str | None = Field(None, description="timeframe | merged | semantic (default: timeframe)")
+    sync_version: str | None = Field(None, description="ohlcv | indicators (default: ohlcv)")
+
+
+class ReplayConfigRequest(BaseModel):
+    """Parameters for updating replay configuration."""
+    sync_type: str | None = Field(None, description="timeframe | merged | semantic")
+    sync_version: str | None = Field(None, description="ohlcv | indicators")
+
+
+# ── Responses ───────────────────────────────────────
+
+
+class TensorMeta(BaseModel):
+    """Metadata describing a generated tensor."""
+    window_size: int
+    num_features: int
+    num_rows: int
+    num_windows: int
+    tensor_shape: list[int]
+    feature_columns: list[str]
+
+
+class PipelineStatus(BaseModel):
+    """Current status of the data pipeline."""
+    mode: str  # "idle" | "historical" | "realtime" | "replay"
+    replay_active: bool
+    replay_step: int | None = None
+    replay_total_steps: int | None = None
+    sync_type: str | None = None
+    sync_version: str | None = None
+
+
+class HealthResponse(BaseModel):
+    """Health-check response."""
+    status: str = "ok"
+    version: str
+`````
+
 ## File: app/core/processing/indicators.py
 `````python
 """
@@ -5434,6 +6276,7 @@ Organizado por grupos:
 - LIQUIDEZ: CMF, OBV, Elder Ray, EOM, VWAP
 """
 
+import numpy as np
 import pandas as pd
 import ta
 from loguru import logger
@@ -5450,16 +6293,17 @@ class IndicatorEngine:
     _VELOCIDAD: list[tuple[str, callable]] = [
         ("MON", lambda df: ta.momentum.ROCIndicator(df["close"], window=12).roc()),
         ("ROC", lambda df: ta.momentum.ROCIndicator(df["close"], window=14).roc()),
+        ("SQZ_MOM", lambda df: IndicatorEngine._sqz_mom(df, length=20)),
         ("RSI_6", lambda df: ta.momentum.RSIIndicator(df["close"], window=6).rsi()),
         ("RSI_14", lambda df: ta.momentum.RSIIndicator(df["close"], window=14).rsi()),
         ("RSI_24", lambda df: ta.momentum.RSIIndicator(df["close"], window=24).rsi()),
         ("RSI_EMA_6", lambda df: ta.momentum.RSIIndicator(df["close"], window=6).rsi().ewm(span=6).mean()),
         ("RSI_EMA_14", lambda df: ta.momentum.RSIIndicator(df["close"], window=14).rsi().ewm(span=14).mean()),
         ("RSI_EMA_24", lambda df: ta.momentum.RSIIndicator(df["close"], window=24).rsi().ewm(span=24).mean()),
-        ("STOCH_K", lambda df: ta.momentum.StochasticOscillator(df["high"], df["low"], df["close"]).stoch()),
-        ("STOCH_D", lambda df: ta.momentum.StochasticOscillator(df["high"], df["low"], df["close"]).stoch_signal()),
-        ("WILLIAMS_R", lambda df: ta.momentum.WilliamsRIndicator(df["high"], df["low"], df["close"]).williams_r()),
-        ("CCI", lambda df: ta.trend.CCIIndicator(df["high"], df["low"], df["close"]).cci()),
+        ("STOCH_K", lambda df: ta.momentum.StochRSIIndicator(df["close"], window=14, smooth1=3, smooth2=3).stochrsi_k()),
+        ("STOCH_D", lambda df: ta.momentum.StochRSIIndicator(df["close"], window=14, smooth1=3, smooth2=3).stochrsi_d()),
+        ("WILLIAMS_R", lambda df: ta.momentum.WilliamsRIndicator(df["high"], df["low"], df["close"], lbp=22).williams_r()),
+        ("CCI", lambda df: ta.trend.CCIIndicator(df["high"], df["low"], df["close"], window=50).cci()),
     ]
 
     # ===================== TENDENCIA =====================
@@ -5471,9 +6315,9 @@ class IndicatorEngine:
         ("ADX", lambda df: ta.trend.ADXIndicator(df["high"], df["low"], df["close"]).adx()),
         ("DI_PLUS", lambda df: ta.trend.ADXIndicator(df["high"], df["low"], df["close"]).adx_pos()),
         ("DI_MINUS", lambda df: ta.trend.ADXIndicator(df["high"], df["low"], df["close"]).adx_neg()),
+        ("EMA_7", lambda df: ta.trend.EMAIndicator(df["close"], window=7).ema_indicator()),
         ("EMA_22", lambda df: ta.trend.EMAIndicator(df["close"], window=22).ema_indicator()),
-        ("EMA_50", lambda df: ta.trend.EMAIndicator(df["close"], window=50).ema_indicator()),
-        ("EMA_100", lambda df: ta.trend.EMAIndicator(df["close"], window=100).ema_indicator()),
+        ("EMA_99", lambda df: ta.trend.EMAIndicator(df["close"], window=99).ema_indicator()),
         ("ICHIMOKU_TENKAN", lambda df: IndicatorEngine._ichimoku_tenkan(df)),
         ("ICHIMOKU_KIJUN", lambda df: IndicatorEngine._ichimoku_kijun(df)),
         ("ICHIMOKU_SA", lambda df: IndicatorEngine._ichimoku_senkou_a(df)),
@@ -5560,6 +6404,33 @@ class IndicatorEngine:
         ema = ta.trend.EMAIndicator(df["close"], window=20).ema_indicator()
         atr = ta.volatility.AverageTrueRange(df["high"], df["low"], df["close"], window=20).average_true_range()
         return ema - (atr * 2)
+
+    @staticmethod
+    def _sqz_mom(df: pd.DataFrame, length: int = 20) -> pd.Series:
+        src = df["close"]
+
+        tr1 = df["high"] - df["low"]
+        tr2 = df["high"] - df["close"].shift()
+        tr3 = df["low"] - df["close"].shift()
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        kc_ma = src.rolling(length).mean()
+        kc_range = tr.rolling(length).mean()
+
+        highest_hl = df["high"].rolling(length).max()
+        lowest_hl = df["low"].rolling(length).min()
+        sma_close = src.rolling(length).mean()
+        midline = (highest_hl + lowest_hl + sma_close) / 3
+
+        return (src - midline).rolling(5).mean()
+
+    @staticmethod
+    def _stoch_rsi_d(df: pd.DataFrame, rsi_period: int = 14, stoch_period: int = 14) -> pd.Series:
+        """Stochastic RSI %D = SMA of %K"""
+        rsi = ta.momentum.RSIIndicator(df["close"], window=rsi_period).rsi()
+        rsi_min = rsi.rolling(window=stoch_period).min()
+        rsi_max = rsi.rolling(window=stoch_period).max()
+        stoch_rsi = ((rsi - rsi_min) / (rsi_max - rsi_min)) * 100
+        return stoch_rsi.rolling(window=3).mean()
 
     # ── Public API ───────────────────────────────────────────
 
@@ -5657,345 +6528,4 @@ class IndicatorEngine:
     def available_indicators(cls) -> dict[str, int]:
         """List available indicators by group."""
         return {group: len(indicators) for group, indicators in cls._GROUPS.items()}
-`````
-
-## File: app/core/tensor/builder.py
-`````python
-
-`````
-
-## File: app/main.py
-`````python
-"""
-IA-APP — FastAPI Application Entry Point.
-
-Initializes the server, registers all routes, and configures
-middleware.  Covers RF-2 (Backend Initialization).
-"""
-
-from contextlib import asynccontextmanager
-
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-
-from app.config import __version__
-from app.api.routes import data, replay  # tensor deshabilitado
-from app.api.schemas import HealthResponse
-from app.utils.logger import setup_logging
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Application lifespan — startup & shutdown hooks."""
-    setup_logging()
-    yield
-
-
-app = FastAPI(
-    title="IA-APP — AI Trading Data Pipeline",
-    description=(
-        "Fase 1: Infraestructura, Servidor y Pipeline de Datos. "
-        "Obtiene, sincroniza, normaliza y entrega tensores de mercado "
-        "multi-temporalidad (1h, 4h, 1d) listos para redes neuronales."
-    ),
-    version=__version__,
-    lifespan=lifespan,
-)
-
-# ── CORS ────────────────────────────────────────────
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# ── Routes ──────────────────────────────────────────
-app.include_router(data.router)
-app.include_router(replay.router)
-# app.include_router(tensor.router)  # deshabilitado
-
-
-# ── Health ──────────────────────────────────────────
-@app.get("/health", response_model=HealthResponse, tags=["System"])
-def health_check():
-    """Endpoint de salud del servidor."""
-    return HealthResponse(status="ok", version=__version__)
-`````
-
-## File: app/api/routes/replay.py
-`````python
-"""
-Replay endpoints — start, stop, and status of market replay sessions.
-Covers RF-5 (Market Replay) exposure via API.
-
-Usa BacktraderReplay con buffers dinámicos:
-- buffer_1h: todas las velas 1h acumuladas (warmup + progresivas)
-- buffer_4h: velas 4h (cerradas + en progreso)
-- buffer_1d: velas 1d (cerradas + en progreso)
-
-El replay usa TODOS los datos acumulados para indicadores.
-"""
-
-import asyncio
-
-from fastapi import APIRouter, HTTPException
-import pandas as pd
-
-from app.api.schemas import PipelineStatus, ReplayRequest
-from app.config import settings
-from app.core.data_ingestion.historical import HistoricalDataFetcher
-from app.core.data_ingestion.replay_backtrader import BacktraderReplay
-from app.core.processing.indicators import IndicatorEngine
-from app.core.sync.multi_timeframe import MultiTimeframeSync
-
-router = APIRouter(prefix="/replay", tags=["Market Replay"])
-
-_historical = HistoricalDataFetcher()
-_sync = MultiTimeframeSync()
-
-_current_replay: BacktraderReplay | None = None
-_current_step: int = 0
-_replay_active: bool = False
-_current_sync_type = "timeframe"
-_current_sync_version = "indicators"
-
-
-@router.post("/start")
-async def start_replay(req: ReplayRequest):
-    """Start a new market replay session.
-
-    Fetch 1h del rango especificado (since - until).
-    Por cada step:
-    - Agregar vela 1h al buffer
-    - Reconstruir 4h (cierra cada 4 steps)
-    - Reconstruir 1d (cierra cada 24 steps)
-    - Calcular indicadores con TODOS los datos acumulados
-    - sincronizar timeframes
-
-    El replay es indefinido - recorre todos los datos del rango.
-    """
-    global _current_replay, _current_step, _replay_active, _current_sync_type, _current_sync_version
-
-    if _current_replay and _current_replay.is_active:
-        raise HTTPException(status_code=409, detail="Replay already running — stop it first")
-
-    try:
-        since = req.since or (req.until if req.until else None)
-        until = req.until
-
-        # Fetch 1h del rango completo
-        raw_1h = _historical.fetch(
-            symbol=req.symbol,
-            timeframe="1h",
-            since=since,
-            until=until,
-        )
-
-        min_required = settings.replay_indicators_warmup + 1
-        if len(raw_1h) < min_required:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Insufficient data: {len(raw_1h)} rows. Need at least {min_required} (~{min_required//24} days). "
-                f"Indicators warmup uses {settings.replay_indicators_warmup} rows (~{settings.replay_indicators_warmup//24} days). "
-                f"This leaves {len(raw_1h) - settings.replay_indicators_warmup} replay steps."
-            )
-
-        # Crear replay con warmup de 2400 datos para indicadores completos
-        _current_replay = BacktraderReplay(
-            data_1h=raw_1h,
-            window_size=settings.tensor_window_size,
-            speed_multiplier=req.speed_multiplier,
-            refresh_seconds=settings.replay_refresh_seconds,
-        )
-        _current_step = 0
-        _replay_active = True
-        _current_sync_type = req.sync_type or settings.sync_type
-        _current_sync_version = req.sync_version or settings.sync_version
-
-        asyncio.create_task(_run_replay())
-
-        return {
-            "status": "started",
-            "total_steps": _current_replay.total_steps,
-            "speed": req.speed_multiplier,
-            "warmup_1h_rows": settings.replay_indicators_warmup,
-            "warmup_days": settings.replay_indicators_warmup // 24,
-            "total_1h_data": len(raw_1h),
-            "replay_start_date": str(_current_replay.first_step_date),
-            "sync_type": _current_sync_type,
-            "sync_version": _current_sync_version,
-            "note": f"Indicators warmup uses {settings.replay_indicators_warmup} rows (~100 days). Step 1 starts at: {_current_replay.first_step_date}",
-        }
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
-
-
-@router.post("/stop")
-def stop_replay():
-    """Stop the currently running replay."""
-    global _current_replay, _replay_active
-    if _current_replay:
-        _current_replay.stop()
-        _replay_active = False
-        return {
-            "status": "stopped",
-            "step": _current_step,
-        }
-    return {"status": "no_replay_running"}
-
-
-@router.get("/status", response_model=PipelineStatus)
-def replay_status():
-    """Return the current replay status."""
-    return PipelineStatus(
-        mode="replay" if _replay_active else "idle",
-        replay_active=_replay_active,
-        replay_step=_current_step if _replay_active else None,
-        replay_total_steps=_current_replay.total_steps if _current_replay else None,
-    )
-
-
-async def _run_replay():
-    """Consume the replay stream and process with indicators."""
-    global _current_step, _replay_active, _current_sync_type, _current_sync_version
-
-    if not _current_replay:
-        return
-
-    # Asegurar valores por defecto del sync
-    if not _current_sync_type:
-        _current_sync_type = settings.sync_type
-    if not _current_sync_version:
-        _current_sync_version = settings.sync_version
-
-    # Mensaje de inicio con fecha exacta
-    first_date = _current_replay.first_step_date
-    window_size = settings.tensor_window_size
-    window_end = first_date + pd.Timedelta(hours=window_size)
-
-    logger.info("=== REPLAY START ===")
-    logger.info("Total steps: {}".format(_current_replay.total_steps))
-    logger.info("Warmup rows: {} (~100 days)".format(settings.replay_indicators_warmup))
-    logger.info("Step 1 starts at: {}".format(first_date))
-    logger.info("Window size: {} hours".format(window_size))
-    logger.info("First window (100 steps): {} to {}".format(first_date, window_end))
-    logger.info("Sync type: {} (version: {})".format(_current_sync_type, _current_sync_version))
-    logger.info("=" * 40)
-
-    try:
-        async for window in _current_replay.stream():
-            if not _replay_active:
-                break
-
-            step = window["step"]
-            _current_step = step + 1
-
-            try:
-                buffers = {
-                    "1h": window["buffer_1h"],
-                    "4h": window["buffer_4h"],
-                    "1d": window["buffer_1d"],
-                }
-
-                # Obtener datos DIRECTAMENTE de los buffers - NO del sync
-                buf_1h = buffers["1h"]
-                buf_4h = buffers["4h"]
-                buf_1d = buffers["1d"]
-
-                last_1h = buf_1h.iloc[-1].to_dict() if not buf_1h.empty else {}
-                last_4h = buf_4h.iloc[-1].to_dict() if not buf_4h.empty else {}
-                last_1d = buf_1d.iloc[-1].to_dict() if not buf_1d.empty else {}
-
-                # Log de reconstrucción - usando valores de los buffers directamente
-                logger.info("=== Step {} ===".format(step))
-                logger.info("1h: O:{:.2f} H:{:.2f} L:{:.2f} C:{:.2f} V:{:.0f} P:{:.2f}".format(
-                    last_1h.get("open", 0),
-                    last_1h.get("high", 0),
-                    last_1h.get("low", 0),
-                    last_1h.get("close", 0),
-                    last_1h.get("volume", 0),
-                    last_1h.get("progress_vela", 1.0),
-                ))
-                logger.info("4h: O:{:.2f} H:{:.2f} L:{:.2f} C:{:.2f} V:{:.0f} P:{:.2f}".format(
-                    last_4h.get("open", 0),
-                    last_4h.get("high", 0),
-                    last_4h.get("low", 0),
-                    last_4h.get("close", 0),
-                    last_4h.get("volume", 0),
-                    last_4h.get("progress_vela", 0.0),
-                ))
-                logger.info("1d: O:{:.2f} H:{:.2f} L:{:.2f} C:{:.2f} V:{:.0f} P:{:.2f}".format(
-                    last_1d.get("open", 0),
-                    last_1d.get("high", 0),
-                    last_1d.get("low", 0),
-                    last_1d.get("close", 0),
-                    last_1d.get("volume", 0),
-                    last_1d.get("progress_vela", 0.0),
-                ))
-
-                # Sincronizar para uso interno (tensor)
-                # Debug: mostrar tamaño de buffers antes del sync
-                # logger.debug("Before sync - buffers: 1h:{}, 4h:{}, 1d:{}".format(
-                #     len(buffers["1h"]), len(buffers["4h"]), len(buffers["1d"])))
-
-                try:
-                    with_indicators = IndicatorEngine.compute_multi_timeframe(buffers)
-                    synced = _sync.synchronize(
-                        with_indicators,
-                        sync_type=_current_sync_type,
-                        sync_version=_current_sync_version
-                    )
-                    synced = MultiTimeframeSync.add_global_features(synced)
-
-                    logger.debug("Sync completed - shape: {}".format(synced.shape))
-
-                    if synced.empty:
-                        logger.warning("Sync returned empty DataFrame")
-                        continue
-
-                except Exception as sync_error:
-                    logger.error("Sync failed at step {}: {}", _current_step, sync_error)
-                    continue
-
-                # Log del sync generado - TODAS las columnas
-                logger.info("=== SYNC (type:{}, ver:{}) | rows:{} | cols:{} ===".format(
-                    _current_sync_type, _current_sync_version, synced.shape[0], synced.shape[1]))
-                for col in synced.columns:
-                    val = synced.iloc[-1][col]
-                    if pd.notna(val):
-                        logger.info("  {}: {}".format(col, val))
-
-                last_row = synced.iloc[-1].round(2)
-
-                # Nueva fila completa con TODOS los indicadores por temporalidad
-                def get_indicator_cols(prefix):
-                    cols = []
-                    for col in last_row.index:
-                        if f"_{prefix}" in col:
-                            val = last_row[col]
-                            if pd.notna(val):
-                                indicator_name = col.replace(f"_{prefix}", "")
-                                cols.append("{}:{}".format(indicator_name, val))
-                    return " | ".join(cols) if cols else "N/A"
-
-                logger.info("=== FULL ROW - INDICATORS ===")
-                logger.info("1h: |{}|".format(get_indicator_cols("1h")))
-                logger.info("4h: |{}|".format(get_indicator_cols("4h")))
-                logger.info("1d: |{}|".format(get_indicator_cols("1d")))
-
-            except Exception as e:
-                logger.error("Error at step {}: {}", _current_step, e)
-
-        _replay_active = False
-        logger.success("Replay finished — {} steps completed".format(_current_step))
-
-    except Exception as e:
-        logger.error("Replay error: {}", e)
-        _replay_active = False
-
-
-from loguru import logger
 `````

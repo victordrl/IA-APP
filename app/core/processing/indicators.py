@@ -34,8 +34,8 @@ class IndicatorEngine:
         ("RSI_EMA_24", lambda df: ta.momentum.RSIIndicator(df["close"], window=24).rsi().ewm(span=24).mean()),
         ("STOCH_K", lambda df: ta.momentum.StochRSIIndicator(df["close"], window=14, smooth1=3, smooth2=3).stochrsi_k()),
         ("STOCH_D", lambda df: ta.momentum.StochRSIIndicator(df["close"], window=14, smooth1=3, smooth2=3).stochrsi_d()),
-        ("WILLIAMS_R", lambda df: ta.momentum.WilliamsRIndicator(df["high"], df["low"], df["close"]).williams_r()),
-        ("CCI", lambda df: ta.trend.CCIIndicator(df["high"], df["low"], df["close"]).cci()),
+        ("WILLIAMS_R", lambda df: ta.momentum.WilliamsRIndicator(df["high"], df["low"], df["close"], lbp=22).williams_r()),
+        ("CCI", lambda df: ta.trend.CCIIndicator(df["high"], df["low"], df["close"], window=50).cci()),
     ]
 
     # ===================== TENDENCIA =====================

@@ -175,7 +175,7 @@ def plot_ohlcv_window(dfs: dict, n_show: int, symbol: str, since: str, until: st
             ax.set_xticks(list(ticks))
             ax.set_xticklabels([ts.iloc[i].strftime("%m-%d") for i in ticks], rotation=45, fontsize=7)
 
-    fig.suptitle(f"OHLCV — {symbol} | {since[:10]} → {until[:10]}", fontsize=12, fontweight="bold")
+    fig.suptitle(f"OHLCV — {symbol} | {since[:10]} -> {until[:10]}", fontsize=12, fontweight="bold")
     fig.tight_layout(rect=[0, 0, 1, 0.96])
 
 
@@ -256,7 +256,7 @@ def plot_velocidad_window(dfs: dict, n_show: int, symbol: str, since: str, until
             else:
                 ax.set_xticklabels([])
 
-    fig.suptitle(f"VELOCIDAD — {symbol} | {since[:10]} → {until[:10]}", fontsize=12, fontweight="bold")
+    fig.suptitle(f"VELOCIDAD — {symbol} | {since[:10]} -> {until[:10]}", fontsize=12, fontweight="bold")
     fig.tight_layout(rect=[0, 0, 1, 0.95])
 
 
@@ -264,7 +264,7 @@ def plot_tendencia_window(dfs: dict, n_show: int, symbol: str, since: str, until
     rows = [
         ("MACD", None),
         ("ADX / DI+ / DI-", ["ADX", "DI_PLUS", "DI_MINUS"]),
-        ("EMA (22 / 50 / 100)", ["EMA_22", "EMA_50", "EMA_100"]),
+        ("EMA (7 / 22 / 99)", ["EMA_7", "EMA_22", "EMA_99"]),
         ("ICHIMOKU TENKAN / KIJUN", ["ICHIMOKU_TENKAN", "ICHIMOKU_KIJUN"]),
         ("ICHIMOKU SA / SB", ["ICHIMOKU_SA", "ICHIMOKU_SB"]),
         ("ICHIMOKU CHIKOU", ["ICHIMOKU_CHIKOU"]),
@@ -307,7 +307,7 @@ def plot_tendencia_window(dfs: dict, n_show: int, symbol: str, since: str, until
             else:
                 ax.set_xticklabels([])
 
-    fig.suptitle(f"TENDENCIA — {symbol} | {since[:10]} → {until[:10]}", fontsize=12, fontweight="bold")
+    fig.suptitle(f"TENDENCIA — {symbol} | {since[:10]} -> {until[:10]}", fontsize=12, fontweight="bold")
     fig.tight_layout(rect=[0, 0, 1, 0.95])
 
 
@@ -355,7 +355,7 @@ def plot_amplitud_window(dfs: dict, n_show: int, symbol: str, since: str, until:
             else:
                 ax.set_xticklabels([])
 
-    fig.suptitle(f"AMPLITUD — {symbol} | {since[:10]} → {until[:10]}", fontsize=12, fontweight="bold")
+    fig.suptitle(f"AMPLITUD — {symbol} | {since[:10]} -> {until[:10]}", fontsize=12, fontweight="bold")
     fig.tight_layout(rect=[0, 0, 1, 0.95])
 
 
@@ -404,7 +404,7 @@ def plot_liquidez_window(dfs: dict, n_show: int, symbol: str, since: str, until:
             else:
                 ax.set_xticklabels([])
 
-    fig.suptitle(f"LIQUIDEZ — {symbol} | {since[:10]} → {until[:10]}", fontsize=12, fontweight="bold")
+    fig.suptitle(f"LIQUIDEZ — {symbol} | {since[:10]} -> {until[:10]}", fontsize=12, fontweight="bold")
     fig.tight_layout(rect=[0, 0, 1, 0.95])
 
 
@@ -413,7 +413,7 @@ def main():
     parser.add_argument("--host", default=API_BASE)
     parser.add_argument("--symbol", default="BTC/USDT")
     parser.add_argument("--since", default="2026-01-01T00:00:00Z")
-    parser.add_argument("--until", default="2026-07-07T00:00:00Z")
+    parser.add_argument("--until", default="2026-08-07T00:00:00Z")
     parser.add_argument("--rows", type=int, default=80)
     args = parser.parse_args()
 
@@ -425,7 +425,7 @@ def main():
         "include_indicators": True,
     }
 
-    print(f"Descargando {args.symbol} ({args.since} → {args.until}) ...")
+    print(f"Descargando {args.symbol} ({args.since} -> {args.until}) ...")
     data = fetch_data(args.host, payload)
     dfs = build_dfs(data)
 
