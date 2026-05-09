@@ -15,6 +15,7 @@ from loguru import logger
 
 from app.config import settings
 from app.core.data_ingestion.historical import HistoricalDataFetcher
+from app.utils.data_utils import calculate_progress_vela
 
 
 class RealTimeDataFetcher:
@@ -59,43 +60,8 @@ class RealTimeDataFetcher:
         raw = self._exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
         df = pd.DataFrame(raw, columns=self.OHLCV_COLUMNS)
         df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
-        df["progress_vela"] = self._calculate_progress_vela(df["timestamp"], timeframe)
+        df["progress_vela"] = calculate_progress_vela(df["timestamp"], timeframe, is_realtime=True)
         return df
-
-    def _calculate_progress_vela(self, timestamps: pd.Series, timeframe: str) -> pd.Series:
-        """Calculate candle progress (0-1) based on current time.
-
-        For real-time data, calculates how complete the current candle is:
-        - The last candle may be unclosed, so progress < 1.0
-        - Previous candles are closed (progress = 1.0)
-
-        Args:
-            timestamps: Series of candle timestamps.
-            timeframe: Timeframe string (1h, 4h, 1d).
-
-        Returns:
-            Series with progress values (0-1).
-        """
-        now = datetime.now(timezone.utc)
-        result = pd.Series(1.0, index=timestamps.index)
-
-        if timeframe == "1h":
-            minutes_in_hour = 60
-            current_minute = now.hour * 60 + now.minute
-            current_progress = (current_minute % 60) / minutes_in_hour
-            result.iloc[-1] = current_progress
-        elif timeframe == "4h":
-            hours_in_4h = 4
-            current_hour = now.hour
-            hour_in_period = current_hour % hours_in_4h
-            current_progress = (hour_in_period * 60 + now.minute) / (hours_in_4h * 60)
-            result.iloc[-1] = current_progress
-        elif timeframe == "1d":
-            current_hour = now.hour
-            current_progress = (current_hour * 60 + now.minute) / (24 * 60)
-            result.iloc[-1] = current_progress
-
-        return result
 
     def fetch_latest_multi_timeframe(
         self,

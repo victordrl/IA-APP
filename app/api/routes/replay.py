@@ -246,85 +246,74 @@ async def _run_replay():
                 # logger.debug("Before sync - buffers: 1h:{}, 4h:{}, 1d:{}".format(
                 #     len(buffers["1h"]), len(buffers["4h"]), len(buffers["1d"])))
 
-                try:
-                    with_indicators = IndicatorEngine.compute_multi_timeframe(buffers)
-                    synced = _sync.synchronize(
-                        with_indicators,
-                        sync_type=_current_sync_type,
-                        sync_version=_current_sync_version
-                    )
-                    synced = MultiTimeframeSync.add_global_features(synced)
+                # try:
+                #     with_indicators = IndicatorEngine.compute_multi_timeframe(buffers)
+                #     synced = _sync.synchronize(
+                #         with_indicators,
+                #         sync_type=_current_sync_type,
+                #         sync_version=_current_sync_version
+                #     )
+                #     synced = MultiTimeframeSync.add_global_features(synced)
 
-                    logger.debug("Sync completed - shape: {}".format(synced.shape))
+                #     logger.debug("Sync completed - shape: {}".format(synced.shape))
 
-                    if synced.empty:
-                        logger.warning("Sync returned empty DataFrame")
-                        continue
+                #     if synced.empty:
+                #         logger.warning("Sync returned empty DataFrame")
+                #         continue
 
-                except Exception as sync_error:
-                    logger.error("Sync failed at step {}: {}\n{}", _current_step, sync_error, traceback.format_exc())
-                    continue
+                # except Exception as sync_error:
+                #     logger.error("Sync failed at step {}: {}\n{}", _current_step, sync_error, traceback.format_exc())
 
-                last_row = synced.iloc[-1].round(2)
+                # last_row = synced.iloc[-1].round(2)
 
-                OHLC_COLS = ["open", "high", "low", "close"]
-                VOL_PROG_COLS = ["volume", "progress_vela"]
+                # if _current_sync_type == "timeframe":
+                #     logger.info("=== SYNC TIMEFRAME (ver:{}) | rows:{} | cols:{} ===".format(
+                #         _current_sync_version, synced.shape[0], synced.shape[1]))
 
-                if _current_sync_type == "timeframe":
-                    logger.info("=== SYNC TIMEFRAME (ver:{}) | rows:{} | cols:{} ===".format(
-                        _current_sync_version, synced.shape[0], synced.shape[1]))
+                #     for tf in ["1h", "4h", "1d"]:
+                #         cols_line = []
+                #         for col in last_row.index:
+                #             if f"_{tf}" in col and pd.notna(last_row[col]):
+                #                 short_col = col.replace(f"_{tf}", "")
+                #                 if _current_sync_version == "ohlcv" or short_col not in MultiTimeframeSync.OHLC_COLS:
+                #                     cols_line.append("{}:{}".format(short_col, last_row[col]))
+                #         logger.info("{}: | {} |".format(tf, " | ".join(cols_line)))
 
-                    for tf in ["1h", "4h", "1d"]:
-                        cols_line = []
-                        for col in last_row.index:
-                            if f"_{tf}" in col and pd.notna(last_row[col]):
-                                short_col = col.replace(f"_{tf}", "")
-                                if _current_sync_version == "ohlcv" or short_col not in OHLC_COLS:
-                                    cols_line.append("{}:{}".format(short_col, last_row[col]))
-                        logger.info("{}: | {} |".format(tf, " | ".join(cols_line)))
+                # elif _current_sync_type == "merged":
+                #     logger.info("=== SYNC MERGED (ver:{}) | rows:{} | cols:{} ===".format(
+                #         _current_sync_version, synced.shape[0], synced.shape[1]))
 
-                elif _current_sync_type == "merged":
-                    logger.info("=== SYNC MERGED (ver:{}) | rows:{} | cols:{} ===".format(
-                        _current_sync_version, synced.shape[0], synced.shape[1]))
+                #     cols_line = []
+                #     for col in last_row.index:
+                #         if pd.notna(last_row[col]):
+                #             short_col = col.split("_")[0] if "_" in col else col
+                #             if _current_sync_version == "ohlcv" or short_col not in MultiTimeframeSync.OHLC_COLS:
+                #                 cols_line.append("{}:{}".format(col, last_row[col]))
+                #     logger.info("| {} |".format(" | ".join(cols_line)))
 
-                    cols_line = []
-                    for col in last_row.index:
-                        if pd.notna(last_row[col]):
-                            short_col = col.split("_")[0] if "_" in col else col
-                            if _current_sync_version == "ohlcv" or short_col not in OHLC_COLS:
-                                cols_line.append("{}:{}".format(col, last_row[col]))
-                    logger.info("| {} |".format(" | ".join(cols_line)))
+                # elif _current_sync_type == "semantic":
+                #     logger.info("=== SYNC SEMANTIC (ver:{}) | rows:{} | cols:{} ===".format(
+                #         _current_sync_version, synced.shape[0], synced.shape[1]))
 
-                elif _current_sync_type == "semantic":
-                    logger.info("=== SYNC SEMANTIC (ver:{}) | rows:{} | cols:{} ===".format(
-                        _current_sync_version, synced.shape[0], synced.shape[1]))
-
-                    GROUPS = {
-                        "VELOCIDAD": ["MON", "ROC", "RSI_6", "RSI_14", "RSI_24", "RSI_EMA_6", "RSI_EMA_14", "RSI_EMA_24", "STOCH_K", "STOCH_D", "WILLIAMS_R", "CCI"],
-                        "TENDENCIA": ["MACD_LINE", "MACD_SIGNAL", "MACD_HIST", "ADX", "DI_PLUS", "DI_MINUS", "EMA_22", "EMA_50", "EMA_100", "ICHIMOKU_TENKAN", "ICHIMOKU_KIJUN", "ICHIMOKU_SA", "ICHIMOKU_SB", "ICHIMOKU_CHIKOU"],
-                        "AMPLITUD": ["BB_UPPER", "BB_MIDDLE", "BB_LOWER", "BB_WIDTH", "KELTNER_UPPER", "KELTNER_MIDDLE", "KELTNER_LOWER"],
-                        "LIQUIDEZ": ["CMF", "OBV", "ELDER_BULL", "ELDER_BEAR", "EOM", "VWAP"],
-                    }
-
-                    for group_name, indicators in GROUPS.items():
-                        cols_line = []
-                        for tf in ["1h", "4h", "1d"]:
-                            if _current_sync_version == "ohlcv":
-                                for col in OHLC_COLS + VOL_PROG_COLS:
-                                    full_col = "{}_{}".format(col, tf)
-                                    if full_col in last_row.index and pd.notna(last_row[full_col]):
-                                        cols_line.append("{}:{}".format(full_col, last_row[full_col]))
-                            else:
-                                for col in VOL_PROG_COLS:
-                                    full_col = "{}_{}".format(col, tf)
-                                    if full_col in last_row.index and pd.notna(last_row[full_col]):
-                                        cols_line.append("{}:{}".format(full_col, last_row[full_col]))
-                        for ind in indicators:
-                            for tf in ["1h", "4h", "1d"]:
-                                col = "{}_{}".format(ind, tf)
-                                if col in last_row.index and pd.notna(last_row[col]):
-                                    cols_line.append("{}:{}".format(col, last_row[col]))
-                        logger.info("{}: | {} |".format(group_name, " | ".join(cols_line)))
+                #     for group_name, indicators in MultiTimeframeSync.GROUPS.items():
+                #         cols_line = []
+                #         for tf in ["1h", "4h", "1d"]:
+                #             if _current_sync_version == "ohlcv":
+                #                 for col in MultiTimeframeSync.OHLC_COLS + MultiTimeframeSync.VOLUME_PROGRESS_COLS:
+                #                     full_col = "{}_{}".format(col, tf)
+                #                     if full_col in last_row.index and pd.notna(last_row[full_col]):
+                #                         cols_line.append("{}:{}".format(full_col, last_row[full_col]))
+                #             else:
+                #                 for col in MultiTimeframeSync.VOLUME_PROGRESS_COLS:
+                #                     full_col = "{}_{}".format(col, tf)
+                #                     if full_col in last_row.index and pd.notna(last_row[full_col]):
+                #                         cols_line.append("{}:{}".format(full_col, last_row[full_col]))
+                #         for ind in indicators:
+                #             for tf in ["1h", "4h", "1d"]:
+                #                 col = "{}_{}".format(ind, tf)
+                #                 if col in last_row.index and pd.notna(last_row[col]):
+                #                     cols_line.append("{}:{}".format(col, last_row[col]))
+                #         logger.info("{}: | {} |".format(group_name, " | ".join(cols_line)))
 
             except Exception as e:
                 logger.error("Error at step {}: {}", _current_step, e)

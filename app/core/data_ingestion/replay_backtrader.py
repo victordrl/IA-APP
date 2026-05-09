@@ -262,7 +262,7 @@ class BacktraderReplay:
                 "progress_1d": progress_1d,
             }
 
-            await asyncio.sleep(delay)
+            # await asyncio.sleep(delay)
 
         self._active = False
         logger.success("Replay completed — {} steps emitted", self._max_steps)

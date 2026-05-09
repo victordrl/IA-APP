@@ -15,6 +15,7 @@ import pandas as pd
 from loguru import logger
 
 from app.config import settings
+from app.utils.data_utils import calculate_progress_vela
 
 # Ordered fallback list — tried in sequence if the primary fails.
 _EXCHANGE_FALLBACKS = ["binance", "binanceus", "bybit", "okx", "kraken"]
@@ -138,7 +139,7 @@ class HistoricalDataFetcher:
             .reset_index(drop=True)
         )
 
-        df["progress_vela"] = self._calculate_progress_vela(df["timestamp"], timeframe)
+        df["progress_vela"] = calculate_progress_vela(df["timestamp"], timeframe, is_realtime=False)
 
         logger.success("{} candles fetched for {} {}", len(df), symbol, timeframe)
         return df
@@ -182,27 +183,6 @@ class HistoricalDataFetcher:
         if isinstance(dt, str):
             return self._exchange.parse8601(dt)
         return int(dt.timestamp() * 1000)
-
-    def _calculate_progress_vela(self, timestamps: pd.Series, timeframe: str) -> pd.Series:
-        """Calculate candle progress (0-1) for each timestamp.
-
-        Historical data from Binance always comes with closed candles,
-        so progress is always 1.0.
-
-        Args:
-            timestamps: Series of candle timestamps.
-            timeframe: Timeframe string (1h, 4h, 1d).
-
-        Returns:
-            Series with progress values (0-1).
-        """
-        if timeframe == "1h":
-            return pd.Series(1.0, index=timestamps.index)
-        elif timeframe == "4h":
-            return pd.Series(1.0, index=timestamps.index)
-        elif timeframe == "1d":
-            return pd.Series(1.0, index=timestamps.index)
-        return pd.Series(1.0, index=timestamps.index)
 
     def fetch_multi_timeframe(
         self,
