@@ -16,10 +16,12 @@ Usage:
 """
 
 import argparse
+import os
 import requests
 import pandas as pd
 import numpy as np
 import matplotlib
+from datetime import datetime
 matplotlib.use('TkAgg')
 import matplotlib.pyplot as plt
 
@@ -66,6 +68,43 @@ COLORS = {
     "VWAP": "#FFEB3B",
     "EOM": "#9E9E9E",
 }
+
+
+def create_mock_data(symbol: str, n_candles: int = 80) -> dict:
+    """Crea datos simulados (mock) para testing sin API."""
+    np.random.seed(42)
+    base_price = 67000 if "BTC" in symbol else 3500
+
+    def make_tf_data(n: int) -> list:
+        dates = pd.date_range(start="2026-01-01", periods=n, freq="h" if n > 24 else "D")
+        prices = [base_price]
+        for _ in range(n - 1):
+            prices.append(prices[-1] * (1 + np.random.randn() * 0.02))
+
+        data = []
+        for i, (ts, close) in enumerate(zip(dates, prices)):
+            open_p = close * (1 + np.random.uniform(-0.01, 0.01))
+            high = max(open_p, close) * (1 + abs(np.random.uniform(0, 0.015)))
+            low = min(open_p, close) * (1 - abs(np.random.uniform(0, 0.015)))
+            vol = np.random.randint(500, 5000)
+            data.append({
+                "timestamp": ts.isoformat(),
+                "open": open_p,
+                "high": high,
+                "low": low,
+                "close": close,
+                "volume": vol
+            })
+        return data
+
+    data = {}
+    for tf in ["1h", "4h", "1d"]:
+        n = n_candles if tf == "1h" else n_candles // (4 if tf == "4h" else 24)
+        n = max(n, 20)
+        data[tf] = make_tf_data(n)
+
+    print(f"Mock data creado: 1h={len(data['1h'])} velas, 4h={len(data['4h'])}, 1d={len(data['1d'])}")
+    return data
 
 
 def fetch_data(host: str, mode: str, payload: dict = None, realtime_params: dict = None) -> dict:
@@ -418,17 +457,53 @@ def plot_liquidez_window(dfs: dict, n_show: int, symbol: str, since: str, until:
     fig.tight_layout(rect=[0, 0, 1, 0.95])
 
 
+def save_all_figures(output_dir: str):
+    """Guarda todas las figuras abiertas como PNG en la carpeta especificada."""
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+        print(f"Directorio creado: {output_dir}")
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    saved_count = 0
+
+    for fig_num in plt.get_fignums():
+        fig = plt.figure(fig_num)
+        window_title = fig.canvas.manager.get_window_title()
+        safe_name = window_title.replace(" — ", "_").replace(" ", "_").replace("|", "_").replace("/", "_")
+        filename = f"{timestamp}_{safe_name}.png"
+        filepath = os.path.join(output_dir, filename)
+        fig.savefig(filepath, dpi=150, bbox_inches="tight")
+        print(f"Guardado: {filepath}")
+        saved_count += 1
+
+    return saved_count
+
+
 def main():
     parser = argparse.ArgumentParser(description="Indicator Visualizer")
     parser.add_argument("--host", default=API_BASE)
     parser.add_argument("--symbol", default="BTC/USDT")
     parser.add_argument("--since", default="2026-01-01T00:00:00Z")
-    parser.add_argument("--until", default="2026-08-07T00:00:00Z")
+    parser.add_argument("--until", default="2026-11-07T00:00:00Z")
     parser.add_argument("--rows", type=int, default=80)
-    parser.add_argument("--mode", default="historical", choices=["historical", "realtime"])
+    parser.add_argument("--mode", default="historical", choices=["historical", "realtime", "mock"])
+    parser.add_argument("--output-dir", default="outputs", help="Directorio para guardar PNGs")
+    parser.add_argument("--save-png", action="store_true", help="Guardar imágenes como PNG antes de mostrar ventanas")
     args = parser.parse_args()
 
-    if args.mode == "realtime":
+    if args.mode == "mock":
+        print(f"Modo MOCK: Generando datos simulados para {args.symbol} ...")
+        data = create_mock_data(args.symbol, args.rows)
+        dfs = build_dfs(data)
+        since_calc = "2026-01-01"
+        until_calc = "2026-08-07"
+        print("Abriendo ventanas...")
+        plot_ohlcv_window(dfs, args.rows, args.symbol, since_calc, until_calc)
+        plot_velocidad_window(dfs, args.rows, args.symbol, since_calc, until_calc)
+        plot_tendencia_window(dfs, args.rows, args.symbol, since_calc, until_calc)
+        plot_amplitud_window(dfs, args.rows, args.symbol, since_calc, until_calc)
+        plot_liquidez_window(dfs, args.rows, args.symbol, since_calc, until_calc)
+    elif args.mode == "realtime":
         realtime_params = {
             "symbol": args.symbol,
             "limit": 150,
@@ -455,7 +530,7 @@ def main():
         plot_tendencia_window(dfs, n_rows, args.symbol, since_calc, until_calc)
         plot_amplitud_window(dfs, n_rows, args.symbol, since_calc, until_calc)
         plot_liquidez_window(dfs, n_rows, args.symbol, since_calc, until_calc)
-    else:
+    elif args.mode == "historical":
         payload = {
             "symbol": args.symbol,
             "timeframes": ["1h", "4h", "1d"],
@@ -475,6 +550,12 @@ def main():
         plot_liquidez_window(dfs, args.rows, args.symbol, args.since, args.until)
 
     print("5 ventanas abiertas — cerralas para terminar.")
+
+    if args.save_png:
+        print(f"\nGuardando imágenes PNG en: {args.output_dir}")
+        saved = save_all_figures(args.output_dir)
+        print(f"Total de imágenes guardadas: {saved}")
+
     plt.show()
 
 

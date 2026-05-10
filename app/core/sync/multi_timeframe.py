@@ -29,10 +29,10 @@ class MultiTimeframeSync:
     OHLCV_COLS = OHLC_COLS + VOLUME_PROGRESS_COLS
 
     GROUPS = {
-        "VELOCIDAD": ["MON", "ROC", "RSI_6", "RSI_14", "RSI_24", "RSI_EMA_6", "RSI_EMA_14",
+        "VELOCIDAD": ["MON", "ROC", "SQZ_MOM", "RSI_6", "RSI_14", "RSI_24", "RSI_EMA_6", "RSI_EMA_14",
                      "RSI_EMA_24", "STOCH_K", "STOCH_D", "WILLIAMS_R", "CCI"],
         "TENDENCIA": ["MACD_LINE", "MACD_SIGNAL", "MACD_HIST", "ADX", "DI_PLUS", "DI_MINUS",
-                     "EMA_22", "EMA_50", "EMA_100", "ICHIMOKU_TENKAN", "ICHIMOKU_KIJUN",
+                     "EMA_7", "EMA_22", "EMA_50", "EMA_99", "EMA_100", "ICHIMOKU_TENKAN", "ICHIMOKU_KIJUN",
                      "ICHIMOKU_SA", "ICHIMOKU_SB", "ICHIMOKU_CHIKOU"],
         "AMPLITUD": ["BB_UPPER", "BB_MIDDLE", "BB_LOWER", "BB_WIDTH",
                      "KELTNER_UPPER", "KELTNER_MIDDLE", "KELTNER_LOWER"],
@@ -44,14 +44,7 @@ class MultiTimeframeSync:
 
     def synchronize(self, data: dict[str, pd.DataFrame], sync_type: str = None,
                     sync_version: str = None, include_global: bool = True) -> pd.DataFrame:
-        """Main synchronization method.
-
-        Args:
-            data: dict with timeframe keys and DataFrame values
-            sync_type: "timeframe" | "merged" | "semantic" (default from config)
-            sync_version: "ohlcv" | "indicators" (default from config)
-            include_global: add global features (precio_actual, tiempo_normalizado)
-        """
+        """Main synchronization method."""
         sync_type = sync_type or "timeframe"
         sync_version = sync_version or "ohlcv"
 
@@ -78,24 +71,46 @@ class MultiTimeframeSync:
                 base_df = base_df.join(df_copy, how="left")
 
         base_df = base_df.ffill()
-
         result = base_df.copy()
 
-        if sync_type == "timeframe":
-            result = self._sync_timeframe(result, sync_version)
-        elif sync_type == "merged":
-            result = self._sync_merged(result, sync_version)
-        elif sync_type == "semantic":
-            result = self._sync_semantic(result, sync_version)
-        else:
-            raise ValueError(f"Unknown sync_type: {sync_type}")
-
+        # Generate global features FIRST so they exist for all versions
         if include_global:
             result = self.add_global_features(result)
 
+        # Apply filtering based on sync_version
+        cols_to_keep = []
+        for col in result.columns:
+            if col in ["precio_actual", "tiempo_normalizado"]:
+                cols_to_keep.append(col)
+                continue
+                
+            base_col = col.replace("_1h", "").replace("_4h", "").replace("_1d", "")
+            is_ohlc = base_col in self.OHLC_COLS
+            is_vp = base_col in self.VOLUME_PROGRESS_COLS
+            is_indicator = not is_ohlc and not is_vp
+            
+            if sync_version == "base":
+                if is_ohlc or is_vp: cols_to_keep.append(col)
+            elif sync_version == "indicators":
+                if is_vp or is_indicator: cols_to_keep.append(col)
+            else: # "ohlcv"
+                cols_to_keep.append(col)
+                
+        result = result[cols_to_keep]
+
+        # Order columns based on sync_type
+        if sync_type == "timeframe":
+            result = self._sync_timeframe(result)
+        elif sync_type == "merged":
+            result = self._sync_merged(result)
+        elif sync_type == "semantic":
+            result = self._sync_semantic(result)
+        else:
+            raise ValueError(f"Unknown sync_type: {sync_type}")
+
         return result
 
-    def _sync_timeframe(self, df: pd.DataFrame, version: str) -> pd.DataFrame:
+    def _sync_timeframe(self, df: pd.DataFrame) -> pd.DataFrame:
         """Tipo 1: Cada timeframe con sus indicadores juntos."""
         result_cols = []
 
@@ -108,33 +123,26 @@ class MultiTimeframeSync:
             vol_prog_tf = [c for c in tf_cols if c.endswith(f"_{tf}") and c.replace(f"_{tf}", "") in self.VOLUME_PROGRESS_COLS]
             indicators_tf = [c for c in tf_cols if c not in ohlc_tf and c not in vol_prog_tf]
 
-            if version == "ohlcv":
-                result_cols.extend(ohlc_tf)
-                result_cols.extend(vol_prog_tf)
-            elif version == "indicators":
-                result_cols.extend(vol_prog_tf)
-
+            result_cols.extend(ohlc_tf)
+            result_cols.extend(vol_prog_tf)
             result_cols.extend(indicators_tf)
 
         for col in df.columns:
-            if not any(f"_{tf}" in col for tf in ["1h", "4h", "1d"]):
+            if col not in result_cols:
                 result_cols.append(col)
 
         return df[result_cols].copy()
 
-    def _sync_merged(self, df: pd.DataFrame, version: str) -> pd.DataFrame:
+    def _sync_merged(self, df: pd.DataFrame) -> pd.DataFrame:
         """Tipo 2: Todos los indicadores juntos sin separación por timeframe."""
         result_cols = []
 
-        if version == "ohlcv":
-            for tf in ["1h", "4h", "1d"]:
-                ohlcv_cols = [c for c in df.columns if f"_{tf}" in c and c.replace(f"_{tf}", "") in self.OHLCV_COLS]
-                result_cols.extend(ohlcv_cols)
-        elif version == "indicators":
-            for tf in ["1h", "4h", "1d"]:
-                vol_prog_cols = [c for c in df.columns if f"_{tf}" in c and c.replace(f"_{tf}", "") in self.VOLUME_PROGRESS_COLS]
-                result_cols.extend(vol_prog_cols)
+        # 1. OHLCV
+        for tf in ["1h", "4h", "1d"]:
+            ohlcv_cols = [c for c in df.columns if f"_{tf}" in c and c.replace(f"_{tf}", "") in self.OHLCV_COLS]
+            result_cols.extend(ohlcv_cols)
 
+        # 2. Indicators
         all_indicators = set()
         for tf in ["1h", "4h", "1d"]:
             tf_indicators = [c for c in df.columns if f"_{tf}" in c and c.replace(f"_{tf}", "") not in self.OHLC_COLS and c.replace(f"_{tf}", "") not in self.VOLUME_PROGRESS_COLS]
@@ -148,19 +156,19 @@ class MultiTimeframeSync:
 
         return df[result_cols].copy()
 
-    def _sync_semantic(self, df: pd.DataFrame, version: str) -> pd.DataFrame:
+    def _sync_semantic(self, df: pd.DataFrame) -> pd.DataFrame:
         """Tipo 3: Por grupos semánticos (VELOCIDAD, TENDENCIA, AMPLITUD, LIQUIDEZ)."""
         result_cols = []
 
-        if version == "ohlcv":
-            for tf in ["1h", "4h", "1d"]:
-                ohlcv_cols = [c for c in df.columns if f"_{tf}" in c and c.replace(f"_{tf}", "") in self.OHLCV_COLS]
-                result_cols.extend(ohlcv_cols)
-        elif version == "indicators":
-            for tf in ["1h", "4h", "1d"]:
-                vol_prog_cols = [c for c in df.columns if f"_{tf}" in c and c.replace(f"_{tf}", "") in self.VOLUME_PROGRESS_COLS]
-                result_cols.extend(vol_prog_cols)
+        # Group logic is actually mainly handled downstream by market_engine formatting
+        # Here we just order them loosely.
+        
+        # 1. OHLCV
+        for tf in ["1h", "4h", "1d"]:
+            ohlcv_cols = [c for c in df.columns if f"_{tf}" in c and c.replace(f"_{tf}", "") in self.OHLCV_COLS]
+            result_cols.extend(ohlcv_cols)
 
+        # 2. Semantic Groups
         for group_name, indicators in self.GROUPS.items():
             for indicator in indicators:
                 for tf in ["1h", "4h", "1d"]:

@@ -23,15 +23,23 @@ class ReplayRequest(BaseModel):
     timeframes: list[str] = Field(["1h", "4h", "1d"])
     since: str | None = Field(None)
     until: str | None = Field(None)
-    speed_multiplier: float = Field(1.0, ge=0.1, le=100.0)
     sync_type: str | None = Field(None, description="timeframe | merged | semantic (default: timeframe)")
-    sync_version: str | None = Field(None, description="ohlcv | indicators (default: ohlcv)")
+    sync_version: str | None = Field(None, description="base | ohlcv | indicators (default: ohlcv)")
+
+
+class RealtimeRequest(BaseModel):
+    """Parameters for starting a market realtime session."""
+    symbol: str = Field("BTC/USDT")
+    timeframes: list[str] = Field(["1h", "4h", "1d"])
+    n_steps: int = Field(50, description="Amount of steps to return in the realtime window")
+    sync_type: str | None = Field("timeframe", description="timeframe | merged | semantic (default: timeframe)")
+    sync_version: str | None = Field("ohlcv", description="base | ohlcv | indicators (default: ohlcv)")
 
 
 class ReplayConfigRequest(BaseModel):
     """Parameters for updating replay configuration."""
     sync_type: str | None = Field(None, description="timeframe | merged | semantic")
-    sync_version: str | None = Field(None, description="ohlcv | indicators")
+    sync_version: str | None = Field(None, description="base | ohlcv | indicators")
 
 
 # ── Responses ───────────────────────────────────────
