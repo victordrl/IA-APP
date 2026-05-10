@@ -13,6 +13,8 @@ import pandas as pd
 import ta
 from loguru import logger
 
+from app.core.processing.normalization import DataNormalizer
+
 from app.utils.indicator_helpers import (
     ichimoku_tenkan,
     ichimoku_kijun,
@@ -172,13 +174,17 @@ class IndicatorEngine:
         return result
 
     @classmethod
-    def compute_multi_timeframe(cls, data: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
+    def compute_multi_timeframe(cls, data: dict[str, pd.DataFrame], normalized: bool = False) -> dict[str, pd.DataFrame]:
         """Compute indicators for each timeframe in the dict."""
         result = {}
         for tf, df in data.items():
             df_with_indicators = cls.compute(df, timeframe_suffix=tf)
+            
+            if normalized:
+                df_with_indicators = DataNormalizer.normalize_indicators(df_with_indicators, suffix=f"_{tf}")
+                
             numeric_cols = df_with_indicators.select_dtypes(include=['float64', 'float32', 'int64', 'int32']).columns
-            df_with_indicators[numeric_cols] = df_with_indicators[numeric_cols].round(2)
+            df_with_indicators[numeric_cols] = df_with_indicators[numeric_cols].round(4)
             result[tf] = df_with_indicators
         return result
 

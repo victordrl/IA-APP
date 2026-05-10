@@ -4,6 +4,7 @@ Uses MarketReplayEngine to simulate historical data sequentially without sleeps.
 """
 
 from fastapi import APIRouter, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from app.api.schemas import ReplayRequest
 from app.config import settings
 from app.core.data_ingestion.historical import HistoricalDataFetcher
@@ -25,7 +26,8 @@ async def run_replay(req: ReplayRequest):
         since = req.since or (req.until if req.until else None)
         until = req.until
 
-        raw_1h = HISTORICAL.fetch(
+        raw_1h = await run_in_threadpool(
+            HISTORICAL.fetch,
             symbol=req.symbol,
             timeframe="1h",
             since=since,
@@ -44,7 +46,12 @@ async def run_replay(req: ReplayRequest):
 
         engine = MarketReplayEngine(data_1h=raw_1h, warmup_size=warmup)
         
-        results = engine.run_replay(sync_type=sync_type, sync_version=sync_version)
+        results = await run_in_threadpool(
+            engine.run_replay,
+            sync_type=sync_type, 
+            sync_version=sync_version,
+            normalized=req.normalized
+        )
 
         return {
             "status": "finished",

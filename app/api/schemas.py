@@ -25,6 +25,7 @@ class ReplayRequest(BaseModel):
     until: str | None = Field(None)
     sync_type: str | None = Field(None, description="timeframe | merged | semantic (default: timeframe)")
     sync_version: str | None = Field(None, description="base | ohlcv | indicators (default: ohlcv)")
+    normalized: bool = Field(False, description="Apply machine learning normalization to the dataset")
 
 
 class RealtimeRequest(BaseModel):
@@ -34,6 +35,7 @@ class RealtimeRequest(BaseModel):
     n_steps: int = Field(50, description="Amount of steps to return in the realtime window")
     sync_type: str | None = Field("timeframe", description="timeframe | merged | semantic (default: timeframe)")
     sync_version: str | None = Field("ohlcv", description="base | ohlcv | indicators (default: ohlcv)")
+    normalized: bool = Field(False, description="Apply machine learning normalization to the dataset")
 
 
 class ReplayConfigRequest(BaseModel):

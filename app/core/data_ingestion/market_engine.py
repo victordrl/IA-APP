@@ -70,7 +70,7 @@ class MarketEngineBase:
             })
         return pd.DataFrame(rows)
 
-    def process_step(self, step: int, sync_type: str, sync_version: str) -> dict:
+    def process_step(self, step: int, sync_type: str, sync_version: str, normalized: bool = False) -> dict:
         """
         Processes a single 1h step, updates 4h/1d progressive values, 
         calculates indicators, synchronizes and returns it.
@@ -109,7 +109,10 @@ class MarketEngineBase:
         buffers_dict = {"1h": step_buf_1h, "4h": step_buf_4h, "1d": step_buf_1d}
 
         # 5. Compute Indicators
-        with_indicators = IndicatorEngine.compute_multi_timeframe(buffers_dict)
+        with_indicators = IndicatorEngine.compute_multi_timeframe(
+            buffers_dict, 
+            normalized=normalized
+        )
 
         # 6. Synchronization
         synced = self.sync_engine.synchronize(
@@ -211,7 +214,7 @@ class MarketEngineBase:
 class MarketReplayEngine(MarketEngineBase):
     """Engine for unlimited market replay execution."""
 
-    def run_replay(self, sync_type: str, sync_version: str) -> List[dict]:
+    def run_replay(self, sync_type: str, sync_version: str, normalized: bool = False) -> List[dict]:
         """
         Executes without interruptions and returns all steps 
         collected in an unbounded global buffer.
@@ -221,7 +224,7 @@ class MarketReplayEngine(MarketEngineBase):
         logger.info(f"Starting Replay for {total_steps_to_run} steps...")
 
         for step in range(total_steps_to_run):
-            res = self.process_step(step, sync_type, sync_version)
+            res = self.process_step(step, sync_type, sync_version, normalized)
             global_buffer.append(res)
 
             if step % 50 == 0:
@@ -240,12 +243,12 @@ class MarketRealtimeEngine(MarketEngineBase):
         # Sliding buffer logic: FIFO limited size
         self.global_buffer = deque(maxlen=self.n_steps)
 
-    def add_next_step(self, step: int, sync_type: str, sync_version: str) -> dict:
+    def add_next_step(self, step: int, sync_type: str, sync_version: str, normalized: bool = False) -> dict:
         """Processes the next step and pushes it to the bounded buffer."""
         if step >= self.total_rows - self.warmup_size:
             raise ValueError("No more realtime data available in the dataset.")
 
-        res = self.process_step(step, sync_type, sync_version)
+        res = self.process_step(step, sync_type, sync_version, normalized)
         self.global_buffer.append(res)
         
         # Memory Optimization: Prune raw buffers to prevent memory leak in realtime

@@ -4,6 +4,7 @@ Uses MarketRealtimeEngine to process real-time market data with a bounded FIFO b
 """
 
 from fastapi import APIRouter, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from datetime import datetime, timedelta
 from app.api.schemas import RealtimeRequest
 from app.config import settings
@@ -30,7 +31,8 @@ async def run_realtime(req: RealtimeRequest):
         since_str = since_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
         until_str = until_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
         
-        raw_1h = HISTORICAL.fetch(
+        raw_1h = await run_in_threadpool(
+            HISTORICAL.fetch,
             symbol=req.symbol,
             timeframe="1h",
             since=since_str,
@@ -51,14 +53,21 @@ async def run_realtime(req: RealtimeRequest):
         
         total_steps_to_run = engine.total_rows - engine.warmup_size
         
-        # Procesar todos los steps históricos hasta el presente
-        for step in range(total_steps_to_run):
-            try:
-                engine.add_next_step(step, sync_type, sync_version)
-            except ValueError:
-                break
-                
-        results = engine.get_latest_steps()
+        def process_realtime_loop():
+            # Procesar todos los steps históricos hasta el presente
+            for step in range(total_steps_to_run):
+                try:
+                    engine.add_next_step(
+                        step, 
+                        sync_type=sync_type, 
+                        sync_version=sync_version, 
+                        normalized=req.normalized
+                    )
+                except ValueError:
+                    break
+            return engine.get_latest_steps()
+            
+        results = await run_in_threadpool(process_realtime_loop)
 
         return {
             "status": "finished",

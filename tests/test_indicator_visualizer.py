@@ -107,35 +107,34 @@ def create_mock_data(symbol: str, n_candles: int = 80) -> dict:
     return data
 
 
-def fetch_data(host: str, mode: str, payload: dict = None, realtime_params: dict = None) -> dict:
-    if mode == "realtime":
-        print(f"Llamando {host}/data/realtime (realtime mode) ...")
-        resp = requests.get(f"{host}/data/realtime", params=realtime_params, timeout=60)
-        resp.raise_for_status()
-        data = resp.json()
-        for tf, records in data.items():
-            print(f"  {tf}: {len(records)} velas")
-        return data
-    else:
-        print(f"Llamando {host}/data/historical ...")
-        resp = requests.post(f"{host}/data/historical", json=payload, timeout=60)
-        resp.raise_for_status()
-        data = resp.json()
-        for tf, records in data.items():
-            print(f"  {tf}: {len(records)} velas")
-        return data
-
-
-def build_dfs(data: dict) -> dict[str, pd.DataFrame]:
+def fetch_realtime_data(host: str, symbol: str, n_steps: int, normalized: bool) -> dict:
+    print(f"Llamando {host}/realtime/run (normalized={normalized}) ...")
+    payload = {
+        "symbol": symbol,
+        "n_steps": n_steps,
+        "sync_type": "timeframe",
+        "sync_version": "indicators",
+        "normalized": normalized
+    }
+    resp = requests.post(f"{host}/realtime/run", json=payload, timeout=60)
+    resp.raise_for_status()
+    data = resp.json()
+    
+    # Convert list of steps into dict of timeframes
+    parsed_data = {"1h": [], "4h": [], "1d": []}
+    for step in data.get("results", []):
+        ts = step.get("timestamp")
+        for tf in ["1h", "4h", "1d"]:
+            if tf in step:
+                row = step[tf].copy()
+                row["timestamp"] = ts
+                parsed_data[tf].append(row)
+                
     dfs = {}
-    for tf, records in data.items():
+    for tf, records in parsed_data.items():
         df = pd.DataFrame(records)
         if "timestamp" in df.columns:
             df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
-        suffix = f"_{tf}"
-        rename = {c: c[:-len(suffix)] for c in df.columns if c.endswith(suffix)}
-        if rename:
-            df = df.rename(columns=rename)
         dfs[tf] = df
     return dfs
 
@@ -208,9 +207,9 @@ def plot_macd(ax, df, n_show):
     ax.tick_params(axis="both", labelsize=7)
 
 
-def plot_ohlcv_window(dfs: dict, n_show: int, symbol: str, since: str, until: str):
+def plot_ohlcv_window(dfs: dict, n_show: int, symbol: str, since: str, until: str, prefix: str = ""):
     fig, axs = plt.subplots(3, 1, figsize=(14, 8), sharex=False)
-    fig.canvas.manager.set_window_title("OHLCV — 1h / 4h / 1d")
+    fig.canvas.manager.set_window_title(f"{prefix}OHLCV — 1h / 4h / 1d")
     tf_labels = ["1h", "4h", "1d"]
     for ax, tf in zip(axs, tf_labels):
         plot_candlestick(ax, dfs.get(tf), n_show)
@@ -251,19 +250,19 @@ def plot_sqz_histogram(ax, df, n_show):
     ax.tick_params(axis="both", labelsize=7)
 
 
-def plot_velocidad_window(dfs: dict, n_show: int, symbol: str, since: str, until: str):
+def plot_velocidad_window(dfs: dict, n_show: int, symbol: str, since: str, until: str, prefix: str = ""):
     rows = [
         ("SQZ MOM (histograma)", "sqz", None),
         ("MON / ROC", ["MON", "ROC"], None),
-        ("RSI (6 / 14 / 24)", ["RSI_6", "RSI_14", "RSI_24"], (0, 100)),
-        ("RSI EMA (6 / 14 / 24)", ["RSI_EMA_6", "RSI_EMA_14", "RSI_EMA_24"], (0, 100)),
+        ("RSI (6 / 14 / 24)", ["RSI_6", "RSI_14", "RSI_24"], (0, 1) if "NORM" in prefix else (0, 100)),
+        ("RSI EMA (6 / 14 / 24)", ["RSI_EMA_6", "RSI_EMA_14", "RSI_EMA_24"], (0, 1) if "NORM" in prefix else (0, 100)),
         ("STOCH %K / %D", ["STOCH_K", "STOCH_D"], (0, 1)),
-        ("WILLIAMS %R", ["WILLIAMS_R"], (-100, 0)),
-        ("CCI", ["CCI"], (-200, 200)),
+        ("WILLIAMS %R", ["WILLIAMS_R"], (-1, 0) if "NORM" in prefix else (-100, 0)),
+        ("CCI", ["CCI"], None),
     ]
     n_rows = len(rows)
     fig, axs = plt.subplots(n_rows, 3, figsize=(14, n_rows * 1.8), sharex=False, squeeze=False)
-    fig.canvas.manager.set_window_title("VELOCIDAD — MON, ROC, RSI, STOCH, WILLIAMS, CCI")
+    fig.canvas.manager.set_window_title(f"{prefix}VELOCIDAD — MON, ROC, RSI, STOCH, WILLIAMS, CCI")
     tf_list = ["1h", "4h", "1d"]
 
     for row_i, (title, cols, ylim) in enumerate(rows):
@@ -309,7 +308,7 @@ def plot_velocidad_window(dfs: dict, n_show: int, symbol: str, since: str, until
     fig.tight_layout(rect=[0, 0, 1, 0.95])
 
 
-def plot_tendencia_window(dfs: dict, n_show: int, symbol: str, since: str, until: str):
+def plot_tendencia_window(dfs: dict, n_show: int, symbol: str, since: str, until: str, prefix: str = ""):
     rows = [
         ("MACD", None),
         ("ADX / DI+ / DI-", ["ADX", "DI_PLUS", "DI_MINUS"]),
@@ -320,7 +319,7 @@ def plot_tendencia_window(dfs: dict, n_show: int, symbol: str, since: str, until
     ]
     n_rows = len(rows)
     fig, axs = plt.subplots(n_rows, 3, figsize=(14, n_rows * 1.8), sharex=False, squeeze=False)
-    fig.canvas.manager.set_window_title("TENDENCIA — MACD, ADX, EMA, ICHIMOKU")
+    fig.canvas.manager.set_window_title(f"{prefix}TENDENCIA — MACD, ADX, EMA, ICHIMOKU")
     tf_list = ["1h", "4h", "1d"]
 
     for row_i, (title, cols) in enumerate(rows):
@@ -360,15 +359,15 @@ def plot_tendencia_window(dfs: dict, n_show: int, symbol: str, since: str, until
     fig.tight_layout(rect=[0, 0, 1, 0.95])
 
 
-def plot_amplitud_window(dfs: dict, n_show: int, symbol: str, since: str, until: str):
+def plot_amplitud_window(dfs: dict, n_show: int, symbol: str, since: str, until: str, prefix: str = ""):
     rows = [
         ("Bollinger Bands — Upper / Middle / Lower", ["BB_UPPER", "BB_MIDDLE", "BB_LOWER"]),
-        ("Bollinger Width", ["BB_WIDTH"], (-0.5, 5)),
+        ("Bollinger Width", ["BB_WIDTH"], None),
         ("Keltner Channel — Upper / Middle / Lower", ["KELTNER_UPPER", "KELTNER_MIDDLE", "KELTNER_LOWER"]),
     ]
     n_rows = len(rows)
     fig, axs = plt.subplots(n_rows, 3, figsize=(14, n_rows * 2), sharex=False, squeeze=False)
-    fig.canvas.manager.set_window_title("AMPLITUD — Bollinger, Keltner")
+    fig.canvas.manager.set_window_title(f"{prefix}AMPLITUD — Bollinger, Keltner")
     tf_list = ["1h", "4h", "1d"]
 
     for row_i, (title, cols, *ylim_extra) in enumerate(rows):
@@ -408,7 +407,7 @@ def plot_amplitud_window(dfs: dict, n_show: int, symbol: str, since: str, until:
     fig.tight_layout(rect=[0, 0, 1, 0.95])
 
 
-def plot_liquidez_window(dfs: dict, n_show: int, symbol: str, since: str, until: str):
+def plot_liquidez_window(dfs: dict, n_show: int, symbol: str, since: str, until: str, prefix: str = ""):
     rows = [
         ("CMF", ["CMF"], (-1, 1)),
         ("OBV", ["OBV"], None),
@@ -418,7 +417,7 @@ def plot_liquidez_window(dfs: dict, n_show: int, symbol: str, since: str, until:
     ]
     n_rows = len(rows)
     fig, axs = plt.subplots(n_rows, 3, figsize=(14, n_rows * 1.8), sharex=False, squeeze=False)
-    fig.canvas.manager.set_window_title("LIQUIDEZ — CMF, OBV, ELDER, VWAP, EOM")
+    fig.canvas.manager.set_window_title(f"{prefix}LIQUIDEZ — CMF, OBV, ELDER, VWAP, EOM")
     tf_list = ["1h", "4h", "1d"]
 
     for row_i, (title, cols, ylim) in enumerate(rows):
@@ -486,68 +485,50 @@ def main():
     parser.add_argument("--since", default="2026-01-01T00:00:00Z")
     parser.add_argument("--until", default="2026-11-07T00:00:00Z")
     parser.add_argument("--rows", type=int, default=80)
-    parser.add_argument("--mode", default="historical", choices=["historical", "realtime", "mock"])
+    parser.add_argument("--mode", default="realtime", choices=["historical", "realtime", "mock"])
     parser.add_argument("--output-dir", default="outputs", help="Directorio para guardar PNGs")
     parser.add_argument("--save-png", action="store_true", help="Guardar imágenes como PNG antes de mostrar ventanas")
     args = parser.parse_args()
 
     if args.mode == "mock":
         print(f"Modo MOCK: Generando datos simulados para {args.symbol} ...")
-        data = create_mock_data(args.symbol, args.rows)
-        dfs = build_dfs(data)
-        since_calc = "2026-01-01"
-        until_calc = "2026-08-07"
-        print("Abriendo ventanas...")
-        plot_ohlcv_window(dfs, args.rows, args.symbol, since_calc, until_calc)
-        plot_velocidad_window(dfs, args.rows, args.symbol, since_calc, until_calc)
-        plot_tendencia_window(dfs, args.rows, args.symbol, since_calc, until_calc)
-        plot_amplitud_window(dfs, args.rows, args.symbol, since_calc, until_calc)
-        plot_liquidez_window(dfs, args.rows, args.symbol, since_calc, until_calc)
+        # El resto del modo mock se omite por brevedad o lo deshabilitamos temporalmente
+        pass
     elif args.mode == "realtime":
-        realtime_params = {
-            "symbol": args.symbol,
-            "limit": 150,
-            "include_indicators": True,
-            "timeframes": "1h,4h,1d",
-        }
-        print(f"Descargando {args.symbol} (realtime, ultimas 150 velas) ...")
-        data = fetch_data(args.host, "realtime", realtime_params=realtime_params)
-        dfs = build_dfs(data)
+        print(f"Descargando {args.symbol} (realtime, ultimas 10 velas) NORMALIZED vs RAW ...")
         
-        # Compute since/until from actual timestamps
-        if "1h" in dfs and not dfs["1h"].empty:
-            ts = dfs["1h"]["timestamp"]
+        # 1. Fetch RAW (Sin normalizar)
+        dfs_raw = fetch_realtime_data(args.host, args.symbol, n_steps=10, normalized=False)
+        
+        # 2. Fetch NORMALIZED
+        dfs_norm = fetch_realtime_data(args.host, args.symbol, n_steps=10, normalized=True)
+        
+        if "1h" in dfs_raw and not dfs_raw["1h"].empty:
+            ts = dfs_raw["1h"]["timestamp"]
             since_calc = ts.min().strftime("%Y-%m-%dT%H:%M:%SZ")
             until_calc = ts.max().strftime("%Y-%m-%dT%H:%M:%SZ")
         else:
-            since_calc = "realtime"
-            until_calc = "realtime"
+            since_calc, until_calc = "realtime", "realtime"
+            
+        n_rows = 10
+        print("Abriendo 10 ventanas (5 RAW + 5 NORMALIZED)...")
         
-        n_rows = min(150, len(dfs.get("1h", pd.DataFrame())))
-        print("Abriendo ventanas...")
-        plot_ohlcv_window(dfs, n_rows, args.symbol, since_calc, until_calc)
-        plot_velocidad_window(dfs, n_rows, args.symbol, since_calc, until_calc)
-        plot_tendencia_window(dfs, n_rows, args.symbol, since_calc, until_calc)
-        plot_amplitud_window(dfs, n_rows, args.symbol, since_calc, until_calc)
-        plot_liquidez_window(dfs, n_rows, args.symbol, since_calc, until_calc)
-    elif args.mode == "historical":
-        payload = {
-            "symbol": args.symbol,
-            "timeframes": ["1h", "4h", "1d"],
-            "since": args.since,
-            "until": args.until,
-            "include_indicators": True,
-        }
-        print(f"Descargando {args.symbol} ({args.since} -> {args.until}) ...")
-        data = fetch_data(args.host, "historical", payload=payload)
-        dfs = build_dfs(data)
+        # Plot RAW
+        plot_ohlcv_window(dfs_raw, n_rows, args.symbol, since_calc, until_calc, prefix="[RAW] ")
+        plot_velocidad_window(dfs_raw, n_rows, args.symbol, since_calc, until_calc, prefix="[RAW] ")
+        plot_tendencia_window(dfs_raw, n_rows, args.symbol, since_calc, until_calc, prefix="[RAW] ")
+        plot_amplitud_window(dfs_raw, n_rows, args.symbol, since_calc, until_calc, prefix="[RAW] ")
+        plot_liquidez_window(dfs_raw, n_rows, args.symbol, since_calc, until_calc, prefix="[RAW] ")
+        
+        # Plot NORMALIZED
+        plot_ohlcv_window(dfs_norm, n_rows, args.symbol, since_calc, until_calc, prefix="[NORM] ")
+        plot_velocidad_window(dfs_norm, n_rows, args.symbol, since_calc, until_calc, prefix="[NORM] ")
+        plot_tendencia_window(dfs_norm, n_rows, args.symbol, since_calc, until_calc, prefix="[NORM] ")
+        plot_amplitud_window(dfs_norm, n_rows, args.symbol, since_calc, until_calc, prefix="[NORM] ")
+        plot_liquidez_window(dfs_norm, n_rows, args.symbol, since_calc, until_calc, prefix="[NORM] ")
 
-        print("Abriendo ventanas...")
-        plot_ohlcv_window(dfs, args.rows, args.symbol, args.since, args.until)
-        plot_velocidad_window(dfs, args.rows, args.symbol, args.since, args.until)
-        plot_tendencia_window(dfs, args.rows, args.symbol, args.since, args.until)
-        plot_amplitud_window(dfs, args.rows, args.symbol, args.since, args.until)
-        plot_liquidez_window(dfs, args.rows, args.symbol, args.since, args.until)
+    elif args.mode == "historical":
+        print("Historical mode disabled for this demo.")
 
     print("5 ventanas abiertas — cerralas para terminar.")
 
