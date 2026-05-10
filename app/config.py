@@ -37,7 +37,7 @@ class Settings(BaseSettings):
     # ── Replay ──────────────────────────────────────
     replay_speed_multiplier: float = 1.0
     replay_refresh_seconds: float = 5.0
-    replay_indicators_warmup: int = 2400  # ~100 días de 1h para indicadores completos
+    replay_indicators_warmup: int = 3000  # ~100 días de 1h para indicadores completos
 
     @property
     def timeframes_list(self) -> list[str]:
