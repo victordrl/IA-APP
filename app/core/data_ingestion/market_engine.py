@@ -131,7 +131,7 @@ class MarketEngineBase:
         }
 
         # Make sure timestamp is firmly established at the root
-        clean_row["timestamp"] = ts.strftime("%Y-%m-%dT%H")
+        clean_row["timestamp"] = ts.strftime("%Y-%m-%d_%H")
         
         formatted_row = self._format_nested(clean_row, sync_type)
 
