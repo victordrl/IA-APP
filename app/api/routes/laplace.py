@@ -39,9 +39,6 @@ TRAIN_CACHE_FILE = os.path.join(CACHE_DIR, 'laplace_train_cache.json')
 if os.path.exists(MODEL_PATH):
     try:
         _laplace_model = keras.models.load_model(MODEL_PATH)
-        # Build model by calling it with a dummy input
-        dummy_input = np.zeros((1, DEFAULT_WINDOW_SIZE, DEFAULT_FEATURES))
-        _laplace_model(dummy_input, training=False)
         logger.info(f"Loaded existing model from {MODEL_PATH}")
     except Exception as e:
         logger.warning(f"Could not load model: {e}")
@@ -227,7 +224,7 @@ async def laplace_train(
         scaler_path = os.path.join(BASE_DIR, 'escalador_f3.pkl')
         joblib.dump({"means": None, "stds": None}, scaler_path)
         
-        logger.success(f"Laplace_v3 trained and saved to {model_path}")
+        logger.success(f"Laplace_v3 trained and saved to {MODEL_PATH}")
         
         return {
             "status": "trained",
@@ -289,7 +286,7 @@ async def laplace_predict(
         )
         
         # Use smaller warmup for predict (just need enough for 24h window + some buffer)
-        warmup = 100
+        warmup = 30
         
         engine = MarketReplayEngine(data_1h=raw_1h, warmup_size=warmup)
         
@@ -327,16 +324,27 @@ async def laplace_predict(
             sequence.append(row_features)
         
         X_input = np.array([sequence])
-        
-        # Get both outputs: capa_procesamiento (16 features) and final output (20 features)
-        # Create intermediate model to get capa_procesamiento output
-        capa_procesamiento_model = keras.Model(
-            inputs=_laplace_model.input,
-            outputs=_laplace_model.get_layer("capa_procesamiento").output
+
+        def _predict_bottleneck_and_full():
+            # Loaded Sequential models often have no `.input` until called; wire
+            # the same layer instances through an explicit Input (weights stay shared).
+            inp = keras.Input(shape=(DEFAULT_WINDOW_SIZE, DEFAULT_FEATURES))
+            x = inp
+            bottleneck = None
+            for layer in _laplace_model.layers:
+                x = layer(x)
+                if layer.name == "capa_procesamiento":
+                    bottleneck = x
+            if bottleneck is None:
+                raise ValueError(
+                    'Model has no layer named "capa_procesamiento"; retrain or fix architecture.'
+                )
+            dual_model = keras.Model(inputs=inp, outputs=[bottleneck, x])
+            return dual_model.predict(X_input, verbose=0)
+
+        capa_procesamiento_output, final_output = await run_in_threadpool(
+            _predict_bottleneck_and_full
         )
-        
-        capa_procesamiento_output = capa_procesamiento_model.predict(X_input, verbose=0)
-        final_output = _laplace_model.predict(X_input, verbose=0)
         
         mse = np.mean((X_input - final_output) ** 2)
         
