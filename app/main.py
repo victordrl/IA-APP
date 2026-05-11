@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import __version__
 from app.api.routes import data, replay, realtime
+from app.api.routes.laplace import router as laplace_router
 from app.api.schemas import HealthResponse
 from app.utils.logger import setup_logging
 
@@ -46,6 +47,7 @@ app.add_middleware(
 app.include_router(data.router)
 app.include_router(replay.router)
 app.include_router(realtime.router)
+app.include_router(laplace_router)
 
 
 # ── Health ──────────────────────────────────────────
