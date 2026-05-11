@@ -113,10 +113,10 @@ def fetch_realtime_data(host: str, symbol: str, n_steps: int, normalized: bool) 
         "symbol": symbol,
         "n_steps": n_steps,
         "sync_type": "timeframe",
-        "sync_version": "indicators",
+        "sync_version": "ohlcv",
         "normalized": normalized
     }
-    resp = requests.post(f"{host}/realtime/run", json=payload, timeout=60)
+    resp = requests.post(f"{host}/realtime/run", json=payload, timeout=3000)
     resp.raise_for_status()
     data = resp.json()
     
