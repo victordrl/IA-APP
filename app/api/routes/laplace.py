@@ -348,18 +348,35 @@ async def laplace_predict(
         
         mse = np.mean((X_input - final_output) ** 2)
         
+        input_rows = X_input[0].tolist()
+        prediction_rows = final_output[0].tolist()
+        input_named = [
+            {name: float(value) for name, value in zip(feature_cols, row)}
+            for row in input_rows
+        ]
+        prediction_named = [
+            {name: float(value) for name, value in zip(feature_cols, row)}
+            for row in prediction_rows
+        ]
+        
+        logger.info(input_named)
+
         return {
             "status": "predicted",
             "model": "laplace_v3",
             "input_shape": list(X_input.shape),
-            "input": X_input[0].tolist(),  # First sample
+            "input_feature_names": feature_cols,
+            "input": input_rows,  # First sample
+            "input_named": input_named,  # 24 timesteps with feature_name:value
             "capa_procesamiento": {
                 "shape": list(capa_procesamiento_output.shape),
                 "features": capa_procesamiento_output[0].tolist()  # 16 features
             },
             "prediction": {
                 "shape": list(final_output.shape),
-                "data": final_output[0].tolist()  # 24 timesteps x 20 features
+                "feature_names": feature_cols,
+                "data": prediction_rows,  # 24 timesteps x 20 features
+                "named_data": prediction_named  # 24 timesteps with feature_name:value
             },
             "reconstruction_error": float(mse),
             "anomaly_score": "high" if mse > 0.01 else "normal", 
