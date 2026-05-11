@@ -181,7 +181,11 @@ class HistoricalDataFetcher:
     def _to_ms(self, dt: str | datetime) -> int:
         """Convert a datetime or ISO string to Unix milliseconds."""
         if isinstance(dt, str):
-            return self._exchange.parse8601(dt)
+            # Soportar formato corto "2026-01-01T18" o completo "2026-01-01T00:00:00Z"
+            if len(dt) <= 11:  # "YYYY-MM-DDTHH" o "YYYY-MM-DD"
+                dt = pd.to_datetime(dt).to_pydatetime()
+            else:
+                return self._exchange.parse8601(dt)
         return int(dt.timestamp() * 1000)
 
     def fetch_multi_timeframe(

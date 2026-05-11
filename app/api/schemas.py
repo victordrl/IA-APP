@@ -12,8 +12,8 @@ class HistoricalRequest(BaseModel):
     """Parameters for fetching historical OHLCV data."""
     symbol: str = Field("BTC/USDT", description="Trading pair")
     timeframes: list[str] = Field(["1h", "4h", "1d"], description="Candle intervals")
-    since: str | None = Field(None, description="Start date ISO-8601 (e.g. 2026-01-01T00:00:00Z)")
-    until: str | None = Field(None, description="End date ISO-8601")
+    since: str | None = Field(None, description="Start date (e.g. 2026-01-01T18)")
+    until: str | None = Field(None, description="End date (e.g. 2026-05-10T18)")
     include_indicators: bool = Field(False, description="Append technical indicators to the response")
 
 
@@ -21,8 +21,8 @@ class ReplayRequest(BaseModel):
     """Parameters for starting a market replay session."""
     symbol: str = Field("BTC/USDT")
     timeframes: list[str] = Field(["1h", "4h", "1d"])
-    since: str | None = Field(None)
-    until: str | None = Field(None)
+    since: str | None = Field(None, description="Start date (e.g. 2026-01-01T18)")
+    until: str | None = Field(None, description="End date (e.g. 2026-05-10T18)")
     sync_type: str | None = Field(None, description="timeframe | merged | semantic (default: timeframe)")
     sync_version: str | None = Field(None, description="base | ohlcv | indicators (default: ohlcv)")
     normalized: bool = Field(False, description="Apply machine learning normalization to the dataset")

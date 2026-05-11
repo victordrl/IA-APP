@@ -28,8 +28,8 @@ async def run_realtime(req: RealtimeRequest):
         until_dt = datetime.utcnow()
         since_dt = until_dt - timedelta(days=120)
         
-        since_str = since_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-        until_str = until_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        since_str = since_dt.strftime("%Y-%m-%dT%H")
+        until_str = until_dt.strftime("%Y-%m-%dT%H")
         
         raw_1h = await run_in_threadpool(
             HISTORICAL.fetch,
